@@ -196,10 +196,14 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     code = f"{secrets.randbelow(1_000_000):06d}"
     storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
+    # Big tap-to-copy code block — Telegram copies on tap/hold of ``` blocks.
     await update.message.reply_text(
-        f"Pairing code: `{code}`\n\n"
-        f"Open the extension on omnihr.co (after signing in normally), "
-        f"paste this code, click Pair. Expires in 5 min.",
+        f"```\n{code}\n```\n"
+        f"👆 Tap the code to copy.\n\n"
+        f"1. Open any omnihr.co tab (signed in)\n"
+        f"2. Click the ExpenseBot extension icon\n"
+        f"3. Paste the code → Pair\n\n"
+        f"Expires in 5 minutes.",
         parse_mode="Markdown",
     )
 
@@ -546,8 +550,9 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
         tenant_id = org_name.lower().split()[0] if org_name else "unknown"
 
         # Enforce email-domain allowlist
-        user_email = me.get("primary_email")
-        ok, reason = access.email_allowed(user_email)
+        user_email_raw = me.get("primary_email")
+        user_email = access._extract_email(user_email_raw)
+        ok, reason = access.email_allowed(user_email_raw)
         if not ok:
             log.info("pair rejected for email=%s reason=%s", user_email, reason)
             raise HTTPException(status_code=403, detail=reason)

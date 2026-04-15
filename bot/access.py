@@ -63,9 +63,25 @@ def is_allowed(telegram_user_id: str | int, p: Policy | None = None) -> tuple[bo
     return True, ""
 
 
-def email_allowed(email: str | None, p: Policy | None = None) -> tuple[bool, str]:
+def _extract_email(raw) -> str | None:
+    """OmniHR's primary_email can be a plain string OR a dict like
+    {"value": "x@y.com", ...}. Be liberal."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict):
+        for key in ("value", "email", "address"):
+            v = raw.get(key)
+            if isinstance(v, str):
+                return v
+    return None
+
+
+def email_allowed(email_raw, p: Policy | None = None) -> tuple[bool, str]:
     """Second gate — after pairing we know the OmniHR email. Enforce domain allowlist."""
     p = p or load()
+    email = _extract_email(email_raw)
     if not p.allowed_email_domains:
         return True, ""
     if not email:
