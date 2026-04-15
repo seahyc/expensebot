@@ -151,6 +151,32 @@ Open to PRs. Patterns to follow:
 - New tenant? Pair with bot, then edit `tenants/<org>.md` with natural-language rules.
 - New channel (Slack, WhatsApp, Discord)? Add `bot/<channel>/` mirroring `bot/telegram/` interface.
 
+## Self-hosting
+
+The hosted instance at `expensebot.seahyingcong.com` is convenient but you're
+trusting someone else with your OmniHR tokens and Anthropic key (encrypted at
+rest, but still — trust is trust). Self-hosting takes ~10 minutes:
+
+```bash
+# 1. On any VM with Docker (1 vCPU / 512MB RAM is plenty)
+git clone https://github.com/seahyc/expensebot
+cd expensebot
+cp .env.example .env
+# Set:
+#   TELEGRAM_BOT_TOKEN (from @BotFather)
+#   ENCRYPTION_KEY  (python -c "import secrets; print(secrets.token_urlsafe(32))")
+#   PUBLIC_BASE_URL (e.g. https://expensebot.you.com)
+
+# 2. Point a DNS A record at your VM IP, front with Caddy or any reverse proxy
+docker compose up -d
+
+# 3. In Chrome, load extension/ unpacked (or distribute via the Chrome Web Store
+#    to your team). Open extension popup → DevTools → set backend URL:
+#    chrome.storage.local.set({backend: "https://expensebot.you.com"})
+```
+
+Your users DM your bot; everything stays on your VM.
+
 ## License
 
 MIT.

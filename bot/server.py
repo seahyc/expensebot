@@ -47,11 +47,11 @@ from omnihr_client.client import OmniHRClient
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
 from omnihr_client.schema import invalidate_schema
 
-from . import storage
+from . import legal, logging_setup, rate_limit, storage
 from .common.parser import parse_receipt
 
+logging_setup.setup()
 log = logging.getLogger("expensebot")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000")
@@ -82,11 +82,12 @@ def load_user_md(_user: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def client_for(user: dict) -> OmniHRClient:
-    if not user.get("access_jwt"):
+    access, refresh = storage.get_omnihr_tokens(user["id"])
+    if not access or not refresh:
         raise AuthError("Not paired — run /pair first")
     tokens = Tokens(
-        access_token=user["access_jwt"],
-        refresh_token=user["refresh_jwt"],
+        access_token=access,
+        refresh_token=refresh,
         access_expires_at=datetime.fromisoformat(user["access_expires_at"]),
         refresh_expires_at=datetime.fromisoformat(user["refresh_expires_at"]),
     )
@@ -98,10 +99,20 @@ def client_for(user: dict) -> OmniHRClient:
 
 
 def anthropic_for(user: dict) -> AsyncAnthropic:
-    key = user.get("anth_key") or os.environ.get("MAINTAINER_ANTHROPIC_API_KEY")
+    key = storage.get_anth_key(user["id"]) or os.environ.get("MAINTAINER_ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("No Anthropic key — run /setkey sk-ant-…")
     return AsyncAnthropic(api_key=key)
+
+
+async def _check_rate(update: Update, user_db_id: int, kind: str) -> bool:
+    ok, retry = rate_limit.check(user_db_id, kind)
+    if not ok:
+        await update.message.reply_text(
+            f"⏱ Rate limit — try again in ~{retry}s."
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +140,8 @@ async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     key = ctx.args[0].strip()
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    if not await _check_rate(update, user_db_id, "setkey"):
+        return
     # quick validity test
     try:
         a = AsyncAnthropic(api_key=key)
@@ -146,6 +159,8 @@ async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    if not await _check_rate(update, user_db_id, "pair"):
+        return
     code = f"{secrets.randbelow(1_000_000):06d}"
     storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
     await update.message.reply_text(
@@ -160,6 +175,8 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
     if not u or not u.get("access_jwt"):
         await update.message.reply_text("Not paired yet — run /pair")
+        return
+    if not await _check_rate(update, u["id"], "list"):
         return
     async with client_for(u) as client:
         try:
@@ -209,6 +226,38 @@ async def cmd_submit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"Submit failed: {e}\nThe action code may need probing — try via web UI once and tell me.")
 
 
+async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
+    if not u:
+        await update.message.reply_text("No account to export.")
+        return
+    data = storage.export_user_data(u["id"])
+    import io, json
+    buf = io.BytesIO(json.dumps(data, indent=2, default=str).encode())
+    buf.name = "expensebot-export.json"
+    await update.message.reply_document(document=buf, filename=buf.name)
+
+
+async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    # Two-step: first /delete-account replies with a warning; second "CONFIRM"
+    # within 60s actually purges.
+    u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
+    if not u:
+        await update.message.reply_text("No account to delete.")
+        return
+    text = " ".join(ctx.args) if ctx.args else ""
+    if text.strip().upper() != "CONFIRM":
+        await update.message.reply_text(
+            "This wipes your key, OmniHR tokens, parsed receipts (claims on "
+            "OmniHR are not affected — you filed those yourself).\n\n"
+            "To proceed, send: `/delete-account CONFIRM`",
+            parse_mode="Markdown",
+        )
+        return
+    storage.delete_user(u["id"])
+    await update.message.reply_text("✅ Account purged.")
+
+
 async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Photo or document arrived. Parse + file as draft."""
     msg = update.message
@@ -238,6 +287,8 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     file_bytes = bytes(await tg_file.download_as_bytearray())
     user_note = (msg.caption or "").strip()
 
+    if not await _check_rate(update, u["id"], "parse"):
+        return
     progress = await msg.reply_text("⏳ Parsing receipt…")
 
     import hashlib
@@ -398,18 +449,29 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    from fastapi.responses import HTMLResponse
+
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok"}
 
-    @app.get("/")
-    async def index() -> dict:
-        return {
-            "service": "expensebot",
-            "extension_pair": "POST /extension/pair",
-            "health": "/healthz",
-            "telegram": "polling" if tg_app else "off",
-        }
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> str:
+        return legal.html_page(
+            "expensebot",
+            "# ExpenseBot\n\n"
+            "Files OmniHR expense claims from a Telegram bot.\n\n"
+            "- [GitHub](https://github.com/seahyc/expensebot)\n"
+            "- [Terms](/terms)  ·  [Privacy](/privacy)\n",
+        )
+
+    @app.get("/terms", response_class=HTMLResponse)
+    async def terms() -> str:
+        return legal.html_page("expensebot — Terms", legal.TERMS_MD)
+
+    @app.get("/privacy", response_class=HTMLResponse)
+    async def privacy() -> str:
+        return legal.html_page("expensebot — Privacy", legal.PRIVACY_MD)
 
     @app.post("/extension/pair")
     async def extension_pair(p: PairPayload) -> dict:
@@ -487,6 +549,8 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("list", cmd_list))
     tg_app.add_handler(CommandHandler("delete", cmd_delete))
     tg_app.add_handler(CommandHandler("submit", cmd_submit))
+    tg_app.add_handler(CommandHandler("export_me", cmd_export))
+    tg_app.add_handler(CommandHandler("delete_account", cmd_delete_account))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
 
     app = make_app(tg_app)

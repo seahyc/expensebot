@@ -1,6 +1,7 @@
 """Tiny SQLite storage layer for the local-test / single-host deployment.
 
-Replace with Postgres once we go multi-tenant production.
+Secrets (anth_key, refresh_jwt, access_jwt) are encrypted via bot.crypto before
+touching the DB. Decrypt only at use time. Never log raw values.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from . import crypto
 
 DB_PATH = Path(__file__).parent.parent / "expensebot.db"
 
@@ -121,7 +124,24 @@ def get_user_by_channel(channel: str, channel_user_id: str) -> dict | None:
 
 def set_anth_key(user_id: int, key: str) -> None:
     with db() as conn:
-        conn.execute("UPDATE users SET anth_key=? WHERE id=?", (key, user_id))
+        conn.execute("UPDATE users SET anth_key=? WHERE id=?", (crypto.encrypt(key), user_id))
+
+
+def get_anth_key(user_id: int) -> str | None:
+    with db() as conn:
+        row = conn.execute("SELECT anth_key FROM users WHERE id=?", (user_id,)).fetchone()
+        return crypto.decrypt(row["anth_key"]) if row and row["anth_key"] else None
+
+
+def get_omnihr_tokens(user_id: int) -> tuple[str | None, str | None]:
+    """Returns (access_jwt, refresh_jwt), decrypted."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT access_jwt, refresh_jwt FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        if not row:
+            return None, None
+        return crypto.decrypt(row["access_jwt"]), crypto.decrypt(row["refresh_jwt"])
 
 
 def set_omnihr_session(
@@ -144,8 +164,8 @@ def set_omnihr_session(
                omnihr_employee_id=?, omnihr_full_name=?, omnihr_email=?, tenant_id=?
                WHERE id=?""",
             (
-                access_jwt,
-                refresh_jwt,
+                crypto.encrypt(access_jwt),
+                crypto.encrypt(refresh_jwt),
                 access_expires_at.isoformat(),
                 refresh_expires_at.isoformat(),
                 employee_id,
@@ -155,6 +175,45 @@ def set_omnihr_session(
                 user_id,
             ),
         )
+
+
+def export_user_data(user_id: int) -> dict:
+    """GDPR-ish export. Decrypts nothing — secrets are never returned."""
+    with db() as conn:
+        u = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not u:
+            return {}
+        rec = conn.execute(
+            "SELECT id, file_sha256, parsed_merchant, parsed_date, parsed_amount, "
+            "parsed_currency, omnihr_doc_id, omnihr_submission_id, status, created_at "
+            "FROM receipts WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+        trips = conn.execute(
+            "SELECT id, name, destination, start_date, end_date, active, created_at "
+            "FROM trips WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+    out = {
+        "user": {
+            k: v
+            for k, v in dict(u).items()
+            if k not in ("anth_key", "refresh_jwt", "access_jwt")
+        },
+        "receipts": [dict(r) for r in rec],
+        "trips": [dict(t) for t in trips],
+        "secrets_note": "API key + OmniHR tokens are encrypted at rest and never exported.",
+    }
+    return out
+
+
+def delete_user(user_id: int) -> None:
+    """Purge all rows for this user."""
+    with db() as conn:
+        conn.execute("DELETE FROM receipts WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM trips WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM pairing_codes WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
 
 
 # --- Pairing codes ---
