@@ -7,6 +7,7 @@
   "host_permissions": [
     "https://*.omnihr.co/*",
     "https://api.omnihr.co/*",
+    "http://localhost:8000/*",
     "https://expensebot.example/*"
   ],
   "background": {

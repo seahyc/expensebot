@@ -110,19 +110,32 @@ class OmniHRClient:
 
     # --- file upload ---
 
-    async def upload_document(self, file_path: Path, name: str | None = None) -> dict[str, Any]:
-        """POST /expense/1.0/document/ (multipart). Returns {id, file_path, ...}."""
+    async def upload_document(
+        self,
+        *,
+        file_bytes: bytes | None = None,
+        file_path: Path | None = None,
+        name: str,
+        media_type: str = "application/pdf",
+    ) -> dict[str, Any]:
+        """POST /expense/1.0/document/ (multipart). Returns {id, file_path, ...}.
+
+        Pass either file_bytes (preferred — matches our chat/email pipelines)
+        or file_path. `name` controls the filename OmniHR records.
+        """
         await self._ensure_fresh()
-        name = name or file_path.name
-        with open(file_path, "rb") as f:
-            files = {"file": (name, f, "application/pdf")}
-            data = {"name": name, "owner": str(self.employee_id)}
-            resp = await self._http.post(
-                "/expense/1.0/document/",
-                cookies=self._cookies(),
-                files=files,
-                data=data,
-            )
+        if file_bytes is None and file_path is None:
+            raise ValueError("Provide file_bytes or file_path")
+        if file_bytes is None:
+            file_bytes = file_path.read_bytes()
+        files = {"file": (name, file_bytes, media_type)}
+        data = {"name": name, "owner": str(self.employee_id)}
+        resp = await self._http.post(
+            "/expense/1.0/document/",
+            cookies=self._cookies(),
+            files=files,
+            data=data,
+        )
         resp.raise_for_status()
         return resp.json()
 

@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: expensebot
+Version: 0.0.1
+Summary: Telegram + Lark bot for filing OmniHR expense claims via receipts
+License: MIT
+Requires-Python: >=3.11
+Requires-Dist: httpx>=0.27
+Requires-Dist: anthropic>=0.40
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn[standard]>=0.32
+Requires-Dist: asyncpg>=0.29
+Requires-Dist: redis>=5.0
+Requires-Dist: pydantic>=2.9
+Requires-Dist: python-telegram-bot>=21.6
+Requires-Dist: weasyprint>=63
+Requires-Dist: boto3>=1.35
+Requires-Dist: stripe>=10
+Requires-Dist: pynacl>=1.5
+Requires-Dist: structlog>=24
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.24; extra == "dev"
+Requires-Dist: ruff>=0.7; extra == "dev"
+Requires-Dist: mypy>=1.13; extra == "dev"
+Requires-Dist: respx>=0.21; extra == "dev"
