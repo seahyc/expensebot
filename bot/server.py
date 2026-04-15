@@ -565,7 +565,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
             refresh_expires_at=refresh_exp,
             employee_id=me.get("id") or p.employee_id,
             full_name=me.get("full_name"),
-            email=me.get("primary_email"),
+            email=user_email,
             tenant_id=tenant_id,
         )
 
