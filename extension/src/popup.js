@@ -1,7 +1,8 @@
 // Popup logic: detect logged-in omnihr.co session, accept pairing code, push to backend.
 
-// Override via chrome.storage.local.set({backend: "http://localhost:8000"}) for dev.
-const DEFAULT_BACKEND = "http://localhost:8000";
+// For local dev, override via:
+//   chrome.storage.local.set({backend: "http://localhost:8000"})
+const DEFAULT_BACKEND = "https://expensebot.seahyingcong.com";
 const BACKEND = await chrome.storage.local.get("backend").then(r => r.backend || DEFAULT_BACKEND);
 
 const statusEl = document.getElementById("status");
