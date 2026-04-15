@@ -1,0 +1,18 @@
+services:
+  expensebot:
+    build: .
+    image: expensebot:latest
+    container_name: expensebot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./expensebot.db:/app/expensebot.db
+    networks:
+      - backend_default
+    # exposed internally only; Caddy reverse-proxies to expensebot:8000
+
+networks:
+  backend_default:
+    external: true
