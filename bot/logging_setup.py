@@ -9,6 +9,8 @@ import re
 REDACTORS: list[tuple[re.Pattern, str]] = [
     # Anthropic API keys
     (re.compile(r"sk-ant-[A-Za-z0-9_\-]+"), "sk-ant-<redacted>"),
+    # Telegram bot tokens (format: <numeric>:<35-char base64-ish>)
+    (re.compile(r"\b\d{6,14}:[A-Za-z0-9_\-]{30,}\b"), "<tg-token>"),
     # JWTs (three base64url-ish segments joined by dots)
     (re.compile(r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"), "<jwt>"),
     # Emails (keep domain so we can still debug)
