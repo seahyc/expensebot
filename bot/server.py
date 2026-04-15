@@ -47,7 +47,7 @@ from omnihr_client.client import OmniHRClient
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
 from omnihr_client.schema import invalidate_schema
 
-from . import legal, logging_setup, rate_limit, storage
+from . import access, legal, logging_setup, rate_limit, storage
 from .common.parser import parse_receipt
 
 logging_setup.setup()
@@ -115,6 +115,22 @@ async def _check_rate(update: Update, user_db_id: int, kind: str) -> bool:
     return True
 
 
+async def _gate(update: Update) -> bool:
+    """Gate every interaction. Returns False if denied (with reply already sent)."""
+    tid = update.effective_user.id if update.effective_user else None
+    if not tid:
+        return False
+    ok, reason = access.is_allowed(tid)
+    if not ok:
+        try:
+            await update.message.reply_text(reason)
+        except Exception:
+            pass
+        log.info("access denied for tg=%s reason=%s", tid, reason)
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Telegram handlers
 # ---------------------------------------------------------------------------
@@ -130,11 +146,26 @@ WELCOME = (
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
     await update.message.reply_text(WELCOME)
 
 
+async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handy for admins to learn a user's Telegram id for allowlist/ban list."""
+    if not await _gate(update):
+        return
+    u = update.effective_user
+    await update.message.reply_text(
+        f"Telegram id: `{u.id}`\nUsername: @{u.username or '(none)'}\nName: {u.full_name}",
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     if not ctx.args:
         await update.message.reply_text("Usage: /setkey sk-ant-…")
         return
@@ -158,6 +189,8 @@ async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
     if not await _check_rate(update, user_db_id, "pair"):
         return
@@ -172,6 +205,8 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
     if not u or not u.get("access_jwt"):
         await update.message.reply_text("Not paired yet — run /pair")
@@ -200,6 +235,8 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     if not ctx.args:
         await update.message.reply_text("Usage: /delete <draft_id>")
         return
@@ -211,6 +248,8 @@ async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_submit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     if not ctx.args:
         await update.message.reply_text("Usage: /submit <draft_id>")
         return
@@ -227,6 +266,8 @@ async def cmd_submit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
     if not u:
         await update.message.reply_text("No account to export.")
@@ -239,6 +280,8 @@ async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
     # Two-step: first /delete-account replies with a warning; second "CONFIRM"
     # within 60s actually purges.
     u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
@@ -260,6 +303,8 @@ async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
 
 async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Photo or document arrived. Parse + file as draft."""
+    if not await _gate(update):
+        return
     msg = update.message
     u = storage.get_user_by_channel("telegram", str(msg.from_user.id))
     if not u:
@@ -500,6 +545,13 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
         org_name = (p.org or {}).get("name") or me.get("org", {}).get("name") or ""
         tenant_id = org_name.lower().split()[0] if org_name else "unknown"
 
+        # Enforce email-domain allowlist
+        user_email = me.get("primary_email")
+        ok, reason = access.email_allowed(user_email)
+        if not ok:
+            log.info("pair rejected for email=%s reason=%s", user_email, reason)
+            raise HTTPException(status_code=403, detail=reason)
+
         storage.set_omnihr_session(
             user_db_id,
             access_jwt=p.access_token,
@@ -544,6 +596,7 @@ async def run() -> None:
 
     tg_app = Application.builder().token(TG_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(CommandHandler("whoami", cmd_whoami))
     tg_app.add_handler(CommandHandler("setkey", cmd_setkey))
     tg_app.add_handler(CommandHandler("pair", cmd_pair))
     tg_app.add_handler(CommandHandler("list", cmd_list))
