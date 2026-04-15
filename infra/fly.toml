@@ -1,0 +1,21 @@
+# Fly.io config skeleton. Region pinned near OmniHR (Singapore) for low latency.
+app = "expensebot"
+primary_region = "sin"
+
+[build]
+  dockerfile = "../Dockerfile"
+
+[env]
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

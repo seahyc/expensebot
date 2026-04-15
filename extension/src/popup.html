@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ExpenseBot</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 320px; padding: 16px; }
+    h1 { font-size: 16px; margin: 0 0 12px; }
+    .status { padding: 8px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+    .ok { background: #e6f4ea; color: #137333; }
+    .warn { background: #fef7e0; color: #b06000; }
+    .err { background: #fce8e6; color: #c5221f; }
+    input { width: 100%; padding: 8px; font-size: 14px; box-sizing: border-box; margin-bottom: 8px; }
+    button { width: 100%; padding: 8px; background: #1a73e8; color: white; border: 0; border-radius: 4px; font-size: 14px; cursor: pointer; }
+    button:disabled { background: #aac4eb; cursor: default; }
+    .small { font-size: 11px; color: #666; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>ExpenseBot</h1>
+  <div id="status" class="status warn">Loading…</div>
+  <input id="code" placeholder="6-digit pairing code" maxlength="6" autocomplete="off">
+  <button id="pair" disabled>Pair</button>
+  <div class="small">Get a code from your bot with <code>/pair</code>.</div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
