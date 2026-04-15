@@ -15,15 +15,29 @@ from .schema import FieldOption, FormField, FormSchema, get_schema, invalidate_s
 
 log = logging.getLogger(__name__)
 
-# Status codes we observed in OmniHR submissions list:
-#   1, 2, 3, 5 = active flavors (draft / submitted / under-review / approved/paid)
-#   4          = appears to be deleted/cancelled
-#   8          = "deleted via quick-action" (returned after we deleted draft #126760)
-# Treat 3 as DRAFT (proven). Others to be confirmed via probing; mapping lives in
-# tenants/<org>.md once verified per-tenant (in case mapping varies, which seems
-# unlikely but we don't trust until we prove).
+# Status codes observed on OmniHR (glints tenant). Mapping may vary per tenant;
+# override in tenants/<org>.md when probed differently.
+#   3 = DRAFT     (proven — created via /draft/ returns this)
+#   7 = SUBMITTED (proven — post-submit state)
+#   8 = DELETED   (proven — quick_action action=1 returns this)
+#   1, 2, 4, 5, 6 = under-review / approved / paid flavors (exact mapping TBD)
 STATUS_DRAFT = 3
-ACTIVE_STATUS_FILTERS = "3,1,2,5"
+STATUS_SUBMITTED = 7
+STATUS_DELETED = 8
+
+STATUS_LABELS: dict[int, str] = {
+    1: "IN REVIEW",
+    2: "IN REVIEW",
+    3: "DRAFT",
+    4: "APPROVED",
+    5: "PAID",
+    6: "REJECTED",
+    7: "SUBMITTED",
+    8: "DELETED",
+}
+
+# All non-deleted states — what /list should show by default.
+ACTIVE_STATUS_FILTERS = "1,2,3,4,5,6,7"
 
 # Quick-action codes (POST /expense-metadata/{id}/quick-actions/ {action: N})
 # action=1 → delete (proven)

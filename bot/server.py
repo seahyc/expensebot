@@ -33,9 +33,10 @@ import httpx
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -43,7 +44,15 @@ from telegram.ext import (
 )
 
 from omnihr_client.auth import Tokens, parse_jwt_exp, refresh_access_token
-from omnihr_client.client import OmniHRClient
+from omnihr_client.client import (
+    ACTIVE_STATUS_FILTERS,
+    QUICK_ACTION_DELETE,
+    QUICK_ACTION_SUBMIT,
+    STATUS_DRAFT,
+    STATUS_LABELS,
+    STATUS_SUBMITTED,
+    OmniHRClient,
+)
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
 from omnihr_client.schema import invalidate_schema
 
@@ -98,8 +107,24 @@ def client_for(user: dict) -> OmniHRClient:
     )
 
 
+_ANTH_PLACEHOLDER_PREFIXES = ("sk-ant-...", "sk-ant-xxx", "sk-ant-your", "")
+
+
+def _plausible_anth_key(key: str | None) -> bool:
+    if not key:
+        return False
+    low = key.strip().lower()
+    if any(low.startswith(p) for p in _ANTH_PLACEHOLDER_PREFIXES):
+        return False
+    return key.startswith("sk-ant-") and len(key) > 30
+
+
 def anthropic_for(user: dict) -> AsyncAnthropic:
-    key = storage.get_anth_key(user["id"]) or os.environ.get("MAINTAINER_ANTHROPIC_API_KEY")
+    user_key = storage.get_anth_key(user["id"])
+    maintainer_key = os.environ.get("MAINTAINER_ANTHROPIC_API_KEY", "").strip()
+    key = user_key if _plausible_anth_key(user_key) else (
+        maintainer_key if _plausible_anth_key(maintainer_key) else None
+    )
     if not key:
         raise RuntimeError("No Anthropic key — run /setkey sk-ant-…")
     return AsyncAnthropic(api_key=key)
@@ -208,6 +233,32 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _claim_summary(r: dict[str, Any]) -> str:
+    status_label = STATUS_LABELS.get(r.get("status", 0), f"?{r.get('status')}")
+    policy = (r.get("policy") or {}).get("name") or "?"
+    return (
+        f"📄 *#{r['id']}* · {r.get('receipt_date','?')}\n"
+        f"{r.get('amount_currency','?')} {r.get('amount','?')} · {policy}\n"
+        f"_{(r.get('description') or '')[:100]}_\n"
+        f"Status: *{status_label}*"
+    )
+
+
+def _claim_buttons(r: dict[str, Any]) -> InlineKeyboardMarkup | None:
+    status = r.get("status", 0)
+    claim_id = r["id"]
+    row = []
+    if status == STATUS_DRAFT:
+        row.append(InlineKeyboardButton("📤 Submit", callback_data=f"submit:{claim_id}"))
+        row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{claim_id}"))
+    row.append(
+        InlineKeyboardButton(
+            "🔗 Open", url="https://glints.omnihr.co/expenses/submission/"
+        )
+    )
+    return InlineKeyboardMarkup([row]) if row else None
+
+
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _gate(update):
         return
@@ -219,23 +270,72 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     async with client_for(u) as client:
         try:
-            data = await client.list_submissions(page_size=10)
+            data = await client.list_submissions(page_size=8)
         except AuthError:
             await update.message.reply_text("Session expired — run /pair to re-link.")
             return
     rows = data.get("results", [])
     if not rows:
-        await update.message.reply_text("No claims found.")
-        return
-    lines = [f"Last {len(rows)} claims:"]
-    for r in rows:
-        status_label = {3: "DRAFT", 1: "ACT", 2: "ACT", 5: "ACT"}.get(r.get("status", 0), str(r.get("status")))
-        lines.append(
-            f"• #{r['id']} {r.get('receipt_date','?')} "
-            f"{r.get('amount_currency','?')} {r.get('amount','?')}"
-            f" — {(r.get('description') or '')[:40]} [{status_label}]"
+        await update.message.reply_text(
+            "No claims yet. Send me a receipt photo or PDF to file your first one."
         )
-    await update.message.reply_text("\n".join(lines))
+        return
+    await update.message.reply_text(f"_Last {len(rows)} claims_", parse_mode="Markdown")
+    for r in rows:
+        await update.message.reply_text(
+            _claim_summary(r), parse_mode="Markdown", reply_markup=_claim_buttons(r)
+        )
+
+
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline-keyboard taps: submit:<id>, delete:<id>, confirm_delete:<id>."""
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    if not await _gate(update):
+        return
+    u = storage.get_user_by_channel("telegram", str(q.from_user.id))
+    if not u or not u.get("access_jwt"):
+        await q.answer("Not paired — run /pair", show_alert=True)
+        return
+    action, _, rest = q.data.partition(":")
+    try:
+        claim_id = int(rest)
+    except ValueError:
+        await q.answer("Bad action", show_alert=True)
+        return
+    await q.answer()  # dismiss Telegram's loading spinner
+
+    try:
+        async with client_for(u) as client:
+            if action == "submit":
+                await client.submit_draft(claim_id)
+                await q.edit_message_text(
+                    f"📤 Submitted #{claim_id}. (If OmniHR didn't accept, the action code "
+                    f"is still tentative — check the dashboard.)",
+                )
+            elif action == "delete":
+                # Confirm first
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Confirm delete", callback_data=f"confirmdelete:{claim_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{claim_id}"),
+                ]])
+                await q.edit_message_reply_markup(reply_markup=kb)
+            elif action == "confirmdelete":
+                await client.delete_submission(claim_id)
+                await q.edit_message_text(f"🗑 Deleted #{claim_id}")
+            elif action == "cancel":
+                # Rebuild buttons as they were for a draft
+                await q.edit_message_reply_markup(
+                    reply_markup=_claim_buttons({"id": claim_id, "status": STATUS_DRAFT})
+                )
+            else:
+                await q.answer(f"Unknown action: {action}", show_alert=True)
+    except AuthError:
+        await q.edit_message_text("Session expired — run /pair to re-link.")
+    except Exception as e:
+        log.exception("callback failed")
+        await q.edit_message_text(f"Action failed: {e}")
 
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -466,11 +566,13 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             omnihr_submission_id=sub_id,
             status=draft.get("status", 3),
         )
+        kb = _claim_buttons({"id": sub_id, "status": STATUS_DRAFT})
         await progress.edit_text(
-            f"✅ Drafted #{sub_id}\n"
+            f"✅ Drafted *#{sub_id}*\n"
             f"{parsed.merchant} {parsed.currency} {parsed.amount} · {parsed.receipt_date}\n"
-            f"{parsed.suggested_sub_category_label or '?'}\n\n"
-            f"/submit {sub_id}  ·  /delete {sub_id}  ·  /list"
+            f"{parsed.suggested_sub_category_label or '?'}",
+            parse_mode="Markdown",
+            reply_markup=kb,
         )
 
 
@@ -609,6 +711,7 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("submit", cmd_submit))
     tg_app.add_handler(CommandHandler("export_me", cmd_export))
     tg_app.add_handler(CommandHandler("delete_account", cmd_delete_account))
+    tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
 
     app = make_app(tg_app)
