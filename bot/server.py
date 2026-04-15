@@ -567,13 +567,24 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             status=draft.get("status", 3),
         )
         kb = _claim_buttons({"id": sub_id, "status": STATUS_DRAFT})
-        await progress.edit_text(
+        caption = (
             f"✅ Drafted *#{sub_id}*\n"
             f"{parsed.merchant} {parsed.currency} {parsed.amount} · {parsed.receipt_date}\n"
-            f"{parsed.suggested_sub_category_label or '?'}",
-            parse_mode="Markdown",
-            reply_markup=kb,
+            f"{parsed.suggested_sub_category_label or '?'}"
         )
+        # Replace the progress message with a preview-attached one
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+        import io
+        buf = io.BytesIO(file_bytes)
+        buf.name = filename
+        if media_type.startswith("image/"):
+            await msg.reply_photo(photo=buf, caption=caption, parse_mode="Markdown", reply_markup=kb)
+        else:
+            # PDFs preview as a file card with the first page rendered by Telegram
+            await msg.reply_document(document=buf, caption=caption, parse_mode="Markdown", reply_markup=kb)
 
 
 # ---------------------------------------------------------------------------
