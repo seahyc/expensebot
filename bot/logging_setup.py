@@ -38,7 +38,14 @@ class RedactFilter(logging.Filter):
 def setup(level: int = logging.INFO) -> None:
     h = logging.StreamHandler()
     h.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
-    h.addFilter(RedactFilter())
+    redact = RedactFilter()
+    h.addFilter(redact)
     root = logging.getLogger()
     root.handlers[:] = [h]
     root.setLevel(level)
+    # Chatty libraries that log URLs (which contain the Telegram bot token) —
+    # suppress below WARNING. The redactor covers anything they do emit.
+    for noisy in ("httpx", "httpcore", "telegram.ext._application"):
+        lg = logging.getLogger(noisy)
+        lg.setLevel(logging.WARNING)
+        lg.addFilter(redact)
