@@ -46,11 +46,12 @@ from telegram.ext import (
 from omnihr_client.auth import Tokens, parse_jwt_exp, refresh_access_token
 from omnihr_client.client import (
     ACTIVE_STATUS_FILTERS,
+    FILTER_SHORTCUTS,
     QUICK_ACTION_DELETE,
     QUICK_ACTION_SUBMIT,
     STATUS_DRAFT,
+    STATUS_FOR_APPROVAL,
     STATUS_LABELS,
-    STATUS_SUBMITTED,
     OmniHRClient,
 )
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
@@ -233,14 +234,28 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+_STATUS_EMOJI = {
+    3: "📝",   # draft
+    7: "📤",   # for approval
+    1: "✅",   # approved
+    2: "💰",   # reimbursed
+    6: "❌",   # rejected
+    8: "🗑",   # deleted
+}
+
+
 def _claim_summary(r: dict[str, Any]) -> str:
-    status_label = STATUS_LABELS.get(r.get("status", 0), f"?{r.get('status')}")
+    status = r.get("status", 0)
+    status_label = STATUS_LABELS.get(status, f"?{status}")
+    emoji = _STATUS_EMOJI.get(status, "📄")
     policy = (r.get("policy") or {}).get("name") or "?"
+    merchant = r.get("merchant") or ""
+    desc = (r.get("description") or "")[:80]
     return (
-        f"📄 *#{r['id']}* · {r.get('receipt_date','?')}\n"
-        f"{r.get('amount_currency','?')} {r.get('amount','?')} · {policy}\n"
-        f"_{(r.get('description') or '')[:100]}_\n"
-        f"Status: *{status_label}*"
+        f"{emoji} *{status_label}* · #{r['id']}\n"
+        f"{r.get('receipt_date','?')} · {r.get('amount_currency','?')} {r.get('amount','?')}\n"
+        f"{merchant} — {policy}\n"
+        f"_{desc}_"
     )
 
 
@@ -251,11 +266,8 @@ def _claim_buttons(r: dict[str, Any]) -> InlineKeyboardMarkup | None:
     if status == STATUS_DRAFT:
         row.append(InlineKeyboardButton("📤 Submit", callback_data=f"submit:{claim_id}"))
         row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{claim_id}"))
-    row.append(
-        InlineKeyboardButton(
-            "🔗 Open", url="https://glints.omnihr.co/expenses/submission/"
-        )
-    )
+    elif status == STATUS_FOR_APPROVAL:
+        row.append(InlineKeyboardButton("🗑 Withdraw", callback_data=f"delete:{claim_id}"))
     return InlineKeyboardMarkup([row]) if row else None
 
 
@@ -268,19 +280,31 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _check_rate(update, u["id"], "list"):
         return
+
+    # Parse filter arg: /list, /list approved, /list drafts, etc.
+    arg = (ctx.args[0].lower() if ctx.args else "all")
+    filters = FILTER_SHORTCUTS.get(arg, ACTIVE_STATUS_FILTERS)
+    filter_label = arg if arg != "all" else "all"
+
     async with client_for(u) as client:
         try:
-            data = await client.list_submissions(page_size=8)
+            data = await client.list_submissions(status_filters=filters, page_size=10)
         except AuthError:
             await update.message.reply_text("Session expired — run /pair to re-link.")
             return
     rows = data.get("results", [])
     if not rows:
+        shortcuts = ", ".join(f"`{k}`" for k in sorted(FILTER_SHORTCUTS) if k not in ("drafts", "paid", "approval"))
         await update.message.reply_text(
-            "No claims yet. Send me a receipt photo or PDF to file your first one."
+            f"No *{filter_label}* claims found.\n\nTry: /list {shortcuts}",
+            parse_mode="Markdown",
         )
         return
-    await update.message.reply_text(f"_Last {len(rows)} claims_", parse_mode="Markdown")
+    total = data.get("count", len(rows))
+    await update.message.reply_text(
+        f"_{filter_label}: {total} claim{'s' if total != 1 else ''}_",
+        parse_mode="Markdown",
+    )
     for r in rows:
         await update.message.reply_text(
             _claim_summary(r), parse_mode="Markdown", reply_markup=_claim_buttons(r)

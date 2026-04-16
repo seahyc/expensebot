@@ -15,29 +15,49 @@ from .schema import FieldOption, FormField, FormSchema, get_schema, invalidate_s
 
 log = logging.getLogger(__name__)
 
-# Status codes observed on OmniHR (glints tenant). Mapping may vary per tenant;
-# override in tenants/<org>.md when probed differently.
-#   3 = DRAFT     (proven — created via /draft/ returns this)
-#   7 = SUBMITTED (proven — post-submit state)
-#   8 = DELETED   (proven — quick_action action=1 returns this)
-#   1, 2, 4, 5, 6 = under-review / approved / paid flavors (exact mapping TBD)
+# Status codes observed on OmniHR (Glints tenant).
+# OmniHR lifecycle:  Draft → Submitted (For Approval) → Approved → Reimbursed
+#
+# Proven values:
+#   3 = DRAFT          (created via /draft/ returns this)
+#   7 = FOR APPROVAL   (after submit — "Submitted" tab, "For Approval" filter)
+#   8 = DELETED        (quick_action action=1 returns this)
+# Likely (from UI dropdown, need to verify when a claim transitions):
+#   1 = APPROVED
+#   2 = REIMBURSED
+#   4, 5, 6 = other/rejected flavors (TBD)
 STATUS_DRAFT = 3
-STATUS_SUBMITTED = 7
+STATUS_FOR_APPROVAL = 7
+STATUS_APPROVED = 1  # tentative
+STATUS_REIMBURSED = 2  # tentative
 STATUS_DELETED = 8
 
 STATUS_LABELS: dict[int, str] = {
-    1: "IN REVIEW",
-    2: "IN REVIEW",
+    1: "APPROVED",
+    2: "REIMBURSED",
     3: "DRAFT",
-    4: "APPROVED",
-    5: "PAID",
+    4: "?",
+    5: "?",
     6: "REJECTED",
-    7: "SUBMITTED",
+    7: "FOR APPROVAL",
     8: "DELETED",
 }
 
-# All non-deleted states — what /list should show by default.
+# All non-deleted states.
 ACTIVE_STATUS_FILTERS = "1,2,3,4,5,6,7"
+
+# Named filter shortcuts for /list <filter>
+FILTER_SHORTCUTS: dict[str, str] = {
+    "all": "1,2,3,4,5,6,7",
+    "draft": "3",
+    "drafts": "3",
+    "submitted": "7",
+    "pending": "7",
+    "approval": "7",
+    "approved": "1",
+    "reimbursed": "2",
+    "paid": "2",
+}
 
 # Quick-action codes (POST /expense-metadata/{id}/quick-actions/ {action: N})
 # action=1 → delete (proven)
