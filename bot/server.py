@@ -305,10 +305,36 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"_{filter_label}: {total} claim{'s' if total != 1 else ''}_",
         parse_mode="Markdown",
     )
-    for r in rows:
-        await update.message.reply_text(
-            _claim_summary(r), parse_mode="Markdown", reply_markup=_claim_buttons(r)
-        )
+    import httpx
+    async with httpx.AsyncClient(timeout=20) as web:
+        for r in rows:
+            caption = _claim_summary(r)
+            kb = _claim_buttons(r)
+            # Look up local receipt for preview
+            local = storage.find_receipt_by_submission(u["id"], r["id"])
+            if local and local.get("omnihr_file_path"):
+                try:
+                    resp = await web.get(local["omnihr_file_path"])
+                    if resp.status_code == 200:
+                        import io
+                        buf = io.BytesIO(resp.content)
+                        buf.name = local.get("omnihr_file_name") or f"receipt-{r['id']}.pdf"
+                        mime = local.get("omnihr_file_mime") or ""
+                        if mime.startswith("image/"):
+                            await update.message.reply_photo(
+                                photo=buf, caption=caption, parse_mode="Markdown", reply_markup=kb
+                            )
+                        else:
+                            await update.message.reply_document(
+                                document=buf, caption=caption, parse_mode="Markdown", reply_markup=kb
+                            )
+                        continue
+                except Exception as e:
+                    log.warning("receipt preview failed for %s: %s", r["id"], e)
+            # Fallback: text-only card
+            await update.message.reply_text(
+                caption, parse_mode="Markdown", reply_markup=kb
+            )
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -588,6 +614,9 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             parsed=parsed.raw,
             omnihr_doc_id=doc_id,
             omnihr_submission_id=sub_id,
+            omnihr_file_path=doc_path,
+            omnihr_file_name=filename,
+            omnihr_file_mime=media_type,
             status=draft.get("status", 3),
         )
         kb = _claim_buttons({"id": sub_id, "status": STATUS_DRAFT})

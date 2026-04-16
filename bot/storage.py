@@ -55,11 +55,18 @@ CREATE TABLE IF NOT EXISTS receipts (
   parsed_currency TEXT,
   omnihr_doc_id INTEGER,
   omnihr_submission_id INTEGER,
+  omnihr_file_path TEXT,      -- signed S3 URL from /document/ response, valid ~7d
+  omnihr_file_name TEXT,
+  omnihr_file_mime TEXT,
   status INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- One-off migrations for existing installs (idempotent)
+CREATE TABLE IF NOT EXISTS __migrations (name TEXT PRIMARY KEY);
+
 CREATE INDEX IF NOT EXISTS receipts_sha_idx ON receipts(user_id, file_sha256);
+CREATE INDEX IF NOT EXISTS receipts_sub_idx ON receipts(user_id, omnihr_submission_id);
 
 CREATE TABLE IF NOT EXISTS trips (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,9 +81,22 @@ CREATE TABLE IF NOT EXISTS trips (
 """
 
 
+_ADD_COLS = [
+    ("receipts", "omnihr_file_path", "TEXT"),
+    ("receipts", "omnihr_file_name", "TEXT"),
+    ("receipts", "omnihr_file_mime", "TEXT"),
+]
+
+
 def init_db(path: Path = DB_PATH) -> None:
     with sqlite3.connect(path) as conn:
         conn.executescript(SCHEMA)
+        # idempotent column adds for already-created DBs
+        for table, col, typ in _ADD_COLS:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError:
+                pass
 
 
 @contextmanager
@@ -262,14 +282,18 @@ def insert_receipt(
     parsed: dict,
     omnihr_doc_id: int | None = None,
     omnihr_submission_id: int | None = None,
+    omnihr_file_path: str | None = None,
+    omnihr_file_name: str | None = None,
+    omnihr_file_mime: str | None = None,
     status: int | None = None,
 ) -> int:
     with db() as conn:
         cur = conn.execute(
             """INSERT INTO receipts (user_id, file_sha256, parsed_json,
                parsed_merchant, parsed_date, parsed_amount, parsed_currency,
-               omnihr_doc_id, omnihr_submission_id, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               omnihr_doc_id, omnihr_submission_id,
+               omnihr_file_path, omnihr_file_name, omnihr_file_mime, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 user_id,
                 file_sha256,
@@ -280,10 +304,23 @@ def insert_receipt(
                 parsed.get("currency"),
                 omnihr_doc_id,
                 omnihr_submission_id,
+                omnihr_file_path,
+                omnihr_file_name,
+                omnihr_file_mime,
                 status,
             ),
         )
         return cur.lastrowid
+
+
+def find_receipt_by_submission(user_id: int, sub_id: int) -> dict | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM receipts WHERE user_id=? AND omnihr_submission_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id, sub_id),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def now_utc() -> datetime:
