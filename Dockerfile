@@ -20,6 +20,7 @@ COPY omnihr_client ./omnihr_client
 COPY bot ./bot
 COPY tenants ./tenants
 COPY ops ./ops
+COPY extension ./extension
 
 ENV PYTHONUNBUFFERED=1 \
     PORT=8000
