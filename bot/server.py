@@ -129,7 +129,7 @@ def anthropic_for(user: dict) -> AsyncAnthropic:
     )
     if not key:
         raise RuntimeError("No Anthropic key — run /setkey sk-ant-…")
-    return AsyncAnthropic(api_key=key)
+    return AsyncAnthropic(api_key=key, max_retries=0)
 
 
 async def _check_rate(update: Update, user_db_id: int, kind: str) -> bool:
