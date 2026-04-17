@@ -353,36 +353,26 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await q.answer()  # dismiss Telegram's loading spinner
 
+    async def _reply(text: str, markup=None):
+        """Reply in the chat — works regardless of whether the original message is text or media."""
+        chat_id = q.message.chat_id if q.message else q.from_user.id
+        await q._bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="Markdown")
+
     try:
         async with client_for(u) as client:
             if action == "submit":
                 await client.submit_draft(claim_id)
-                await q.edit_message_text(
-                    f"📤 Submitted #{claim_id}. (If OmniHR didn't accept, the action code "
-                    f"is still tentative — check the dashboard.)",
-                )
+                await _reply(f"📤 Submitted *#{claim_id}*.")
             elif action == "delete":
-                # Confirm first
-                kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Confirm delete", callback_data=f"confirmdelete:{claim_id}"),
-                    InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{claim_id}"),
-                ]])
-                await q.edit_message_reply_markup(reply_markup=kb)
-            elif action == "confirmdelete":
                 await client.delete_submission(claim_id)
-                await q.edit_message_text(f"🗑 Deleted #{claim_id}")
-            elif action == "cancel":
-                # Rebuild buttons as they were for a draft
-                await q.edit_message_reply_markup(
-                    reply_markup=_claim_buttons({"id": claim_id, "status": STATUS_DRAFT})
-                )
+                await _reply(f"🗑 Deleted *#{claim_id}*")
             else:
                 await q.answer(f"Unknown action: {action}", show_alert=True)
     except AuthError:
-        await q.edit_message_text("Session expired — run /pair to re-link.")
+        await _reply("Session expired — run /pair to re-link.")
     except Exception as e:
         log.exception("callback failed")
-        await q.edit_message_text(f"Action failed: {e}")
+        await _reply(f"Action failed: {e}")
 
 
 async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
