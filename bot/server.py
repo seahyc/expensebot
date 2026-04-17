@@ -274,6 +274,143 @@ def _claim_buttons(r: dict[str, Any]) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup([row]) if row else None
 
 
+def _list_filter_keyboard(active: str = "all") -> InlineKeyboardMarkup:
+    """Inline filter buttons for /list — user taps to switch view."""
+    buttons = [
+        ("All", "list:all"),
+        ("Drafts", "list:draft"),
+        ("Pending", "list:submitted"),
+        ("Approved", "list:approved"),
+        ("Paid", "list:reimbursed"),
+    ]
+    row = []
+    for label, data in buttons:
+        prefix = "▸ " if data == f"list:{active}" else ""
+        row.append(InlineKeyboardButton(f"{prefix}{label}", callback_data=data))
+    return InlineKeyboardMarkup([row])
+
+
+def _parse_list_args(args: list[str]) -> tuple[str, str | None, str | None]:
+    """Parse /list args → (status_filter_key, date_from, date_to).
+
+    Examples:
+      /list                    → ("all", None, None)
+      /list approved           → ("approved", None, None)
+      /list apr                → ("all", "2026-04-01", "2026-04-30")
+      /list approved apr       → ("approved", "2026-04-01", "2026-04-30")
+      /list 2026-04-01 2026-04-15  → ("all", "2026-04-01", "2026-04-15")
+    """
+    from datetime import date as dt_date
+    import calendar
+
+    status_key = "all"
+    date_from = None
+    date_to = None
+
+    months = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "june": 6, "july": 7, "august": 8, "september": 9,
+        "october": 10, "november": 11, "december": 12,
+    }
+
+    for arg in args:
+        low = arg.lower()
+        if low in FILTER_SHORTCUTS:
+            status_key = low
+        elif low in months:
+            m = months[low]
+            y = dt_date.today().year
+            _, last_day = calendar.monthrange(y, m)
+            date_from = f"{y}-{m:02d}-01"
+            date_to = f"{y}-{m:02d}-{last_day}"
+        elif len(low) == 10 and low[4] == "-":  # YYYY-MM-DD
+            if not date_from:
+                date_from = low
+            else:
+                date_to = low
+
+    return status_key, date_from, date_to
+
+
+async def _do_list(
+    update: Update,
+    u: dict,
+    status_key: str = "all",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    *,
+    is_callback: bool = False,
+) -> None:
+    """Shared list logic for both /list command and inline filter callbacks."""
+    filters = FILTER_SHORTCUTS.get(status_key, ACTIVE_STATUS_FILTERS)
+
+    async with client_for(u) as client:
+        try:
+            data = await client.list_submissions(status_filters=filters, page_size=20)
+        except AuthError:
+            msg = "Session expired — run /pair to re-link."
+            if is_callback:
+                await update.callback_query.message.reply_text(msg)
+            else:
+                await update.message.reply_text(msg)
+            return
+
+    rows = data.get("results", [])
+
+    # Client-side date filter
+    if date_from or date_to:
+        filtered = []
+        for r in rows:
+            rd = r.get("receipt_date", "")
+            if date_from and rd < date_from:
+                continue
+            if date_to and rd > date_to:
+                continue
+            filtered.append(r)
+        rows = filtered
+
+    target = update.callback_query.message if is_callback else update.message
+    filter_kb = _list_filter_keyboard(status_key)
+
+    date_label = ""
+    if date_from and date_to:
+        date_label = f" ({date_from} → {date_to})"
+    elif date_from:
+        date_label = f" (from {date_from})"
+
+    if not rows:
+        await target.reply_text(
+            f"No *{status_key}*{date_label} claims found.",
+            parse_mode="Markdown",
+            reply_markup=filter_kb,
+        )
+        return
+
+    total = len(rows)
+    await target.reply_text(
+        f"_{status_key}{date_label}: {total} claim{'s' if total != 1 else ''}_",
+        parse_mode="Markdown",
+        reply_markup=filter_kb,
+    )
+    for r in rows[:10]:  # cap at 10 cards to avoid spam
+        caption = _claim_summary(r)
+        kb = _claim_buttons(r)
+        local = storage.find_receipt_by_submission(u["id"], r["id"])
+        if local and local.get("tg_file_id"):
+            try:
+                fid = local["tg_file_id"]
+                if local.get("tg_file_type") == "photo":
+                    await target.reply_photo(photo=fid, caption=caption, parse_mode="Markdown", reply_markup=kb)
+                else:
+                    await target.reply_document(document=fid, caption=caption, parse_mode="Markdown", reply_markup=kb)
+                continue
+            except Exception as e:
+                log.warning("tg_file_id replay failed for %s: %s", r["id"], e)
+        await target.reply_text(caption, parse_mode="Markdown", reply_markup=kb)
+
+
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _gate(update):
         return
@@ -284,53 +421,8 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "list"):
         return
 
-    # Parse filter arg: /list, /list approved, /list drafts, etc.
-    arg = (ctx.args[0].lower() if ctx.args else "all")
-    filters = FILTER_SHORTCUTS.get(arg, ACTIVE_STATUS_FILTERS)
-    filter_label = arg if arg != "all" else "all"
-
-    async with client_for(u) as client:
-        try:
-            data = await client.list_submissions(status_filters=filters, page_size=10)
-        except AuthError:
-            await update.message.reply_text("Session expired — run /pair to re-link.")
-            return
-    rows = data.get("results", [])
-    if not rows:
-        shortcuts = ", ".join(f"`{k}`" for k in sorted(FILTER_SHORTCUTS) if k not in ("drafts", "paid", "approval"))
-        await update.message.reply_text(
-            f"No *{filter_label}* claims found.\n\nTry: /list {shortcuts}",
-            parse_mode="Markdown",
-        )
-        return
-    total = data.get("count", len(rows))
-    await update.message.reply_text(
-        f"_{filter_label}: {total} claim{'s' if total != 1 else ''}_",
-        parse_mode="Markdown",
-    )
-    for r in rows:
-        caption = _claim_summary(r)
-        kb = _claim_buttons(r)
-        # Look up local receipt for Telegram file_id (instant, cached on TG servers)
-        local = storage.find_receipt_by_submission(u["id"], r["id"])
-        if local and local.get("tg_file_id"):
-            try:
-                fid = local["tg_file_id"]
-                if local.get("tg_file_type") == "photo":
-                    await update.message.reply_photo(
-                        photo=fid, caption=caption, parse_mode="Markdown", reply_markup=kb
-                    )
-                else:
-                    await update.message.reply_document(
-                        document=fid, caption=caption, parse_mode="Markdown", reply_markup=kb
-                    )
-                continue
-            except Exception as e:
-                log.warning("tg_file_id replay failed for %s: %s", r["id"], e)
-        # Fallback: text-only card
-        await update.message.reply_text(
-            caption, parse_mode="Markdown", reply_markup=kb
-        )
+    status_key, date_from, date_to = _parse_list_args(ctx.args or [])
+    await _do_list(update, u, status_key, date_from, date_to)
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -346,12 +438,20 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer("Not paired — run /pair", show_alert=True)
         return
     action, _, rest = q.data.partition(":")
+
+    # Handle list filter callbacks: list:approved, list:draft, etc.
+    if action == "list":
+        await q.answer()
+        status_key = rest or "all"
+        await _do_list(update, u, status_key, is_callback=True)
+        return
+
     try:
         claim_id = int(rest)
     except ValueError:
         await q.answer("Bad action", show_alert=True)
         return
-    await q.answer()  # dismiss Telegram's loading spinner
+    await q.answer()
 
     async def _reply(text: str, markup=None):
         """Reply in the chat — works regardless of whether the original message is text or media."""
