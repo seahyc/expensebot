@@ -260,16 +260,18 @@ STEP1_PROMPT = (
 
 STEP2_PROMPT = (
     "*Step 2 of 3 — install the Chrome extension*\n"
-    "The extension securely hands off your OmniHR login to the bot.\n\n"
-    "👉 [Install it here](https://expensebot.seahyingcong.com/extension) (30 seconds: download, unzip, load in Chrome → Developer mode → Load unpacked).\n\n"
-    "Once it's installed, come back and I'll walk you through step 3."
+    "This is what hands your OmniHR login to the bot.\n\n"
+    "👉 [Install it here](https://expensebot.seahyingcong.com/extension) — the page walks you through it (takes ~30 seconds).\n\n"
+    "Once installed and pinned, come back for step 3."
 )
 
 STEP3_PROMPT = (
     "*Step 3 of 3 — pair your OmniHR account*\n"
-    "1. Open any [omnihr.co](https://app.omnihr.co) tab and make sure you're signed in (Google SSO is fine).\n"
+    "1. Sign in to [omnihr.co](https://app.omnihr.co) in Chrome if you aren't already. "
+    "(If that link shows your dashboard, you're signed in.)\n"
     "2. Send /pair here — I'll reply with a 6-digit code.\n"
-    "3. On the omnihr.co tab, click the *ExpenseBot* extension icon (use the puzzle-piece menu if you haven't pinned it) → paste the code → *Pair*.\n\n"
+    "3. On your omnihr.co tab, click the 💰 *ExpenseBot* icon in Chrome's toolbar "
+    "(or the puzzle-piece menu if unpinned) → paste the code → tap *Pair*.\n\n"
     "That's it — I'll confirm once we're connected."
 )
 
@@ -427,11 +429,17 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"```\n{code}\n```\n"
         f"👆 Tap the code to copy.\n\n"
-        f"1. Open any omnihr.co tab (signed in)\n"
-        f"2. Click the ExpenseBot extension icon\n"
-        f"3. Paste the code → Pair\n\n"
-        f"Expires in 5 minutes.",
+        f"*Before you paste:* make sure you're signed into "
+        f"[omnihr.co](https://app.omnihr.co) in Chrome — if clicking that link "
+        f"takes you straight to your dashboard (not a login page), you're good.\n\n"
+        f"*Then:*\n"
+        f"1. On the omnihr.co tab, click the 💰 ExpenseBot icon in Chrome's toolbar "
+        f"(or the puzzle-piece menu if it isn't pinned yet).\n"
+        f"2. Paste the 6-digit code.\n"
+        f"3. Tap *Pair*.\n\n"
+        f"_Code expires in 5 minutes._",
         parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
 
@@ -1465,15 +1473,22 @@ async function submitKey(){{
 
     @app.get("/extension/download")
     async def extension_download() -> FileResponse:
+        # Inner folder gets a distinct, self-explanatory name so a
+        # non-technical user doesn't wonder which of two "extension" folders
+        # to pick in Chrome's "Load unpacked" dialog.
         import zipfile, tempfile
-        zip_path = Path(tempfile.gettempdir()) / "expensebot-extension.zip"
+        zip_path = Path(tempfile.gettempdir()) / "ExpenseBot-Chrome-Extension.zip"
         ext_dir = REPO_ROOT / "extension"
+        inner = "ExpenseBot-Chrome-Extension"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in ext_dir.rglob("*"):
                 if f.is_file() and not f.name.startswith("."):
-                    zf.write(f, f"extension/{f.relative_to(ext_dir)}")
-        return FileResponse(zip_path, filename="expensebot-extension.zip",
-                            media_type="application/zip")
+                    zf.write(f, f"{inner}/{f.relative_to(ext_dir)}")
+        return FileResponse(
+            zip_path,
+            filename="ExpenseBot-Chrome-Extension.zip",
+            media_type="application/zip",
+        )
 
     @app.get("/terms", response_class=HTMLResponse)
     async def terms() -> str:

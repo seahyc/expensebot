@@ -66,37 +66,88 @@ def extension_page() -> str:
   <h1>💰 ExpenseBot</h1>
   <div class="sub">Chrome Extension</div>
 
-  <p>This extension bridges your OmniHR login to
+  <p>This extension connects your OmniHR login to
   <a href="{link}" target="_blank"><strong>{handle}</strong></a> on Telegram.
   Install once, pair with one tap.</p>
 
-  <a class="btn" href="/extension/download">⬇ Download Extension (.zip)</a>
+  <a class="btn" href="/extension/download">⬇ Download Extension</a>
 
   <h2>Install in 4 steps</h2>
 
   <div class="step">
     <div class="num">1</div>
-    <div class="step-text">Download and unzip the file above</div>
+    <div class="step-text">
+      <strong>Unzip the file you just downloaded.</strong><br>
+      <span style="font-size:13px;color:#999">Double-click
+      <code>ExpenseBot-Chrome-Extension.zip</code> in your Downloads folder.
+      You'll end up with a folder called
+      <code>ExpenseBot-Chrome-Extension</code> — note where it is.</span>
+    </div>
   </div>
+
   <div class="step">
     <div class="num">2</div>
-    <div class="step-text">Open <code>chrome://extensions</code> → toggle <strong>Developer mode</strong> (top right)</div>
+    <div class="step-text">
+      <strong>Open Chrome's extensions page.</strong><br>
+      <span style="font-size:13px;color:#999">Paste <code>chrome://extensions</code>
+      into Chrome's address bar, hit Enter. Flip the <strong>Developer mode</strong>
+      switch in the top-right to ON.</span>
+    </div>
   </div>
+
   <div class="step">
     <div class="num">3</div>
-    <div class="step-text"><strong>Load unpacked</strong> → select the unzipped folder</div>
+    <div class="step-text">
+      <strong>Click <em>Load unpacked</em> (top-left of the page).</strong><br>
+      <span style="font-size:13px;color:#999">A file picker opens. Find the
+      <code>ExpenseBot-Chrome-Extension</code> folder from step 1, click it
+      <strong>once</strong> so it's highlighted, then click
+      <strong>Select</strong> (or Open).
+      <br><br>
+      ⚠️ <strong>Pick the folder itself, not something inside it.</strong>
+      Don't go into <code>icons</code> or <code>src</code> — just click the
+      outer <code>ExpenseBot-Chrome-Extension</code> folder and select it.</span>
+    </div>
   </div>
+
   <div class="step">
     <div class="num">4</div>
-    <div class="step-text">Pin the ExpenseBot icon in your toolbar (puzzle icon → pin)</div>
+    <div class="step-text">
+      <strong>Pin the 💰 icon to your Chrome toolbar.</strong><br>
+      <span style="font-size:13px;color:#999">Click the puzzle-piece icon near
+      your Chrome toolbar, find <em>ExpenseBot</em>, click the pin next to it.
+      The 💰 icon should appear in your toolbar.</span>
+    </div>
   </div>
 
   <div class="divider"></div>
 
-  <h2>Then pair</h2>
-  <p>Message <a href="{link}" target="_blank"><strong>{handle}</strong></a> on Telegram:
-  send <code>/pair</code> → open any omnihr.co tab → click the extension icon →
-  paste the code → done.</p>
+  <h2>Then pair your account</h2>
+  <p style="color:#ccc">Back on <a href="{link}" target="_blank"><strong>{handle}</strong></a>
+  in Telegram:</p>
+  <ol style="padding-left:22px;color:#bbb">
+    <li style="margin:8px 0">Make sure you're signed in to
+      <a href="https://app.omnihr.co" target="_blank" style="color:#8b6cff">omnihr.co</a>
+      in Chrome. (If that link shows your dashboard, you're good. If it shows
+      a login page, sign in first — Google SSO is fine.)</li>
+    <li style="margin:8px 0">Send <code>/pair</code> to the bot. You'll get a 6-digit code.</li>
+    <li style="margin:8px 0">On your omnihr.co tab, click the 💰 icon in the
+      toolbar, paste the 6 digits, tap <strong>Pair</strong>.</li>
+  </ol>
+
+  <div class="divider"></div>
+
+  <h2>Trouble?</h2>
+  <p style="font-size:13px;color:#999"><strong>Chrome says "Manifest file is missing or unreadable":</strong>
+  you selected the wrong folder. Back up one level and pick
+  <code>ExpenseBot-Chrome-Extension</code> directly — not
+  <code>icons</code> or <code>src</code>.</p>
+
+  <p style="font-size:13px;color:#999"><strong>Can't find the 💰 icon:</strong>
+  click the puzzle-piece icon (top-right of Chrome, left of your profile picture),
+  find <em>ExpenseBot</em>, and click the pin. If <em>ExpenseBot</em> isn't listed,
+  install didn't succeed — go back to <code>chrome://extensions</code> and confirm
+  it's there and enabled.</p>
 
   <div class="divider"></div>
 
