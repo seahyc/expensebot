@@ -109,7 +109,7 @@ def client_for(user: dict) -> OmniHRClient:
     )
 
 
-_ANTH_PLACEHOLDER_PREFIXES = ("sk-ant-...", "sk-ant-xxx", "sk-ant-your", "")
+_ANTH_PLACEHOLDER_PREFIXES = ("sk-ant-...", "sk-ant-xxx", "sk-ant-your")
 
 
 def _plausible_anth_key(key: str | None) -> bool:
