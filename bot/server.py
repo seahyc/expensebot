@@ -207,7 +207,7 @@ async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(
         f"[👆 Tap to sign in with Claude]({bridge_url})\n\n"
-        f"_(opens a page — authorize, then paste the callback URL)_",
+        f"_(opens a page — authorize, copy the token, paste it back)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -1038,11 +1038,11 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
     <p class="small">Get one at <a href="https://console.anthropic.com/settings/keys" style="color:#6699cc">console.anthropic.com</a> (~$0.02/receipt)</p>
   </div>
 
-  <!-- STEP 2: paste callback URL (after OAuth) -->
+  <!-- STEP 2: paste token -->
   <div id="s2" class="hide">
-    <p style="color:#eee">✅ Authorized! Now paste the callback URL:</p>
-    <p class="small">Copy the URL from your browser's address bar after authorizing</p>
-    <input id="url" placeholder="https://platform.claude.com/oauth/code/callback?code=..." autocomplete="off" autofocus>
+    <p style="color:#eee">✅ Authorized! Now paste the token:</p>
+    <p class="small">Tap "Copy Code" on the page, then paste it here</p>
+    <input id="url" placeholder="Paste the authentication code here…" autocomplete="off" autofocus>
     <button onclick="submitCode()">Complete Login</button>
     <div id="st"></div>
   </div>
@@ -1076,10 +1076,13 @@ async function submitCode(){{
   const input=document.getElementById('url').value.trim();
   const st=document.getElementById('st');
   let code=null;
-  const m=input.match(/[?&]code=([A-Za-z0-9_\\-]+)/);
-  if(m) code=m[1];
+  // Handle: ?code=XXX (URL), code#state (displayed token), or raw code
+  const urlMatch=input.match(/[?&]code=([A-Za-z0-9_\\-]+)/);
+  const hashMatch=input.match(/^([A-Za-z0-9_\\-]+)#/);
+  if(urlMatch) code=urlMatch[1];
+  else if(hashMatch) code=hashMatch[1];
   else if(input.length>20&&/^[A-Za-z0-9_\\-]+$/.test(input)) code=input;
-  if(!code){{st.innerHTML='<div class="err">Paste the full URL from the address bar.</div>';return;}}
+  if(!code){{st.innerHTML='<div class="err">Couldn\\'t find the code. Tap "Copy Code" on the auth page and paste here.</div>';return;}}
   try{{
     const[r,d]=await post('/auth/complete',{{session:S,code:code}});
     if(r.ok&&d.ok){{document.getElementById('s2').classList.add('hide');document.getElementById('s3').classList.remove('hide');}}
