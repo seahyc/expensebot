@@ -25,7 +25,7 @@ import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -148,7 +148,37 @@ def _plausible_anth_key(key: str | None) -> bool:
     return key.startswith("sk-ant-") and len(key) > 30
 
 
-def anthropic_for(user: dict) -> AsyncAnthropic:
+async def _refresh_oauth_if_needed(user_id: int) -> str | None:
+    """If the stored Claude OAuth access token is close to expiry, refresh
+    it in place and return the new access token. Returns the existing token
+    if still valid, or None if we have no OAuth credentials at all."""
+    access, refresh, exp = storage.get_anth_oauth(user_id)
+    if not access or not _is_oauth_token(access):
+        return access  # None or an API key — caller handles
+    # Refresh 60 s before actual expiry so in-flight requests don't expire
+    # mid-call. If exp is None (legacy pre-migration user), try a refresh
+    # opportunistically; if that fails we'll fall through with the stale token.
+    if exp is None or datetime.now(timezone.utc) >= exp - timedelta(seconds=60):
+        if not refresh:
+            log.warning("OAuth access expired for user=%s but no refresh token stored — user must /login again", user_id)
+            return access
+        ok, new_data = await claude_oauth.refresh_token(refresh)
+        if not ok or not new_data or not new_data.get("access_token"):
+            log.warning("OAuth refresh failed for user=%s", user_id)
+            return access
+        new_exp = datetime.now(timezone.utc) + timedelta(seconds=int(new_data.get("expires_in") or 3600))
+        storage.set_anth_oauth(
+            user_id,
+            access_token=new_data["access_token"],
+            refresh_token=new_data.get("refresh_token") or refresh,
+            expires_at=new_exp,
+        )
+        log.info("OAuth access token refreshed for user=%s", user_id)
+        return new_data["access_token"]
+    return access
+
+
+async def anthropic_for(user: dict) -> AsyncAnthropic:
     """Build an Anthropic client for this user.
 
     Two credential types are possible:
@@ -156,14 +186,12 @@ def anthropic_for(user: dict) -> AsyncAnthropic:
          to the API-key org.
       2. OAuth access token ('sk-ant-oat...')   → Authorization: Bearer
          header, billed to the user's Claude subscription. Requires the
-         oauth-2025-04-20 beta header.
+         oauth-2025-04-20 beta header. Auto-refreshed near expiry.
     """
-    user_cred = storage.get_anth_key(user["id"])
     maintainer_key = os.environ.get("MAINTAINER_ANTHROPIC_API_KEY", "").strip()
+    user_cred = await _refresh_oauth_if_needed(user["id"])
 
     if _is_oauth_token(user_cred):
-        # Claude Code sends a stack of betas in addition to oauth-2025-04-20.
-        # Without claude-code-20250219, some models return opaque 429s.
         return AsyncAnthropic(
             auth_token=user_cred,
             max_retries=2,
@@ -702,7 +730,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             user_md = load_user_md(u)
             try:
                 parsed = await parse_receipt(
-                    anthropic=anthropic_for(u),
+                    anthropic=await anthropic_for(u),
                     file_bytes=file_bytes,
                     media_type=media_type,
                     tenant_md=tenant_md,
@@ -828,7 +856,15 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         progress = await msg.reply_text("⏳ Completing login…")
         ok, err_msg, token_data = await claude_oauth.exchange_code(oauth_state, oauth_code)
         if ok and token_data:
-            storage.set_anth_key(token_data["user_db_id"], token_data["access_token"])
+            exp = None
+            if token_data.get("expires_in"):
+                exp = datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))
+            storage.set_anth_oauth(
+                token_data["user_db_id"],
+                access_token=token_data["access_token"],
+                refresh_token=token_data.get("refresh_token"),
+                expires_at=exp,
+            )
             u = storage.get_user(token_data["user_db_id"])
             await progress.edit_text(
                 "✅ *Step 1 of 3 done — Claude subscription linked.*\n\n"
@@ -841,7 +877,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        anth = anthropic_for(u)
+        anth = await anthropic_for(u)
     except RuntimeError:
         await msg.reply_text(
             "I'd love to help! First, connect your AI:\n\n"
@@ -896,7 +932,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        anth = anthropic_for(u)
+        anth = await anthropic_for(u)
     except RuntimeError:
         await msg.reply_text(
             "I can't read receipts until we connect an AI.\n\n" + _next_step_prompt(u["id"], u),
@@ -986,7 +1022,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             # Fallback to direct Anthropic API
             try:
                 parsed = await parse_receipt(
-                    anthropic=anthropic_for(u),
+                    anthropic=await anthropic_for(u),
                     file_bytes=file_bytes,
                     media_type=media_type,
                     tenant_md=tenant_md,
@@ -1293,9 +1329,17 @@ async function submitKey(){{
         if not ok or not token_data:
             raise HTTPException(400, msg)
 
-        # Store the access token per-user (encrypted)
-        storage.set_anth_key(token_data["user_db_id"], token_data["access_token"])
-        # TODO: also store refresh_token for auto-refresh
+        # Persist access + refresh + expiry so we can auto-refresh when the
+        # ~8h-TTL access token expires.
+        exp = None
+        if token_data.get("expires_in"):
+            exp = datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))
+        storage.set_anth_oauth(
+            token_data["user_db_id"],
+            access_token=token_data["access_token"],
+            refresh_token=token_data.get("refresh_token"),
+            expires_at=exp,
+        )
 
         # DM the user and nudge them into step 2
         if tg_app:

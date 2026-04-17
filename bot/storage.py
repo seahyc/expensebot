@@ -88,6 +88,8 @@ _ADD_COLS = [
     ("receipts", "tg_file_id", "TEXT"),
     ("receipts", "tg_file_type", "TEXT"),  # "photo" or "document"
     ("users", "session_expired_notified_at", "TEXT"),
+    ("users", "anth_refresh_token", "TEXT"),   # encrypted; for Claude OAuth
+    ("users", "anth_expires_at", "TEXT"),      # ISO UTC; for Claude OAuth
 ]
 
 
@@ -146,8 +148,51 @@ def get_user_by_channel(channel: str, channel_user_id: str) -> dict | None:
 
 
 def set_anth_key(user_id: int, key: str) -> None:
+    """Store a bare credential (API key or OAuth access token) without
+    refresh/expiry metadata. Used by /setkey and the legacy OAuth path."""
     with db() as conn:
-        conn.execute("UPDATE users SET anth_key=? WHERE id=?", (crypto.encrypt(key), user_id))
+        conn.execute(
+            "UPDATE users SET anth_key=?, anth_refresh_token=NULL, anth_expires_at=NULL WHERE id=?",
+            (crypto.encrypt(key), user_id),
+        )
+
+
+def set_anth_oauth(
+    user_id: int,
+    *,
+    access_token: str,
+    refresh_token: str | None,
+    expires_at: datetime | None,
+) -> None:
+    """Store a Claude-subscription OAuth credential set so we can
+    auto-refresh when the access token nears expiry."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET anth_key=?, anth_refresh_token=?, anth_expires_at=? WHERE id=?",
+            (
+                crypto.encrypt(access_token),
+                crypto.encrypt(refresh_token) if refresh_token else None,
+                expires_at.isoformat() if expires_at else None,
+                user_id,
+            ),
+        )
+
+
+def get_anth_oauth(user_id: int) -> tuple[str | None, str | None, datetime | None]:
+    """Return (access_token, refresh_token, expires_at) for Claude OAuth.
+    All fields may be None if the user hasn't logged in via OAuth or the
+    flow didn't return a refresh token."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT anth_key, anth_refresh_token, anth_expires_at FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None, None, None
+        access = crypto.decrypt(row["anth_key"]) if row["anth_key"] else None
+        refresh = crypto.decrypt(row["anth_refresh_token"]) if row["anth_refresh_token"] else None
+        exp = datetime.fromisoformat(row["anth_expires_at"]) if row["anth_expires_at"] else None
+        return access, refresh, exp
 
 
 # Memory structure borrowed from Claude Code's auto-memory system:
