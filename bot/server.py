@@ -285,6 +285,46 @@ READY_PROMPT = (
 )
 
 
+def _web_next_step_html(user_db_id: int, u: dict | None) -> dict:
+    """Return {'title': str, 'body_html': str} for the post-auth success panel.
+    Mirrors _next_step_prompt but emits HTML so we can render on the web page
+    without asking the user to bounce to Telegram to learn what to do next."""
+    has_ai = bool(storage.get_anth_key(user_db_id))
+    has_omnihr = bool(u and u.get("access_jwt"))
+    tg_link = f"https://t.me/{pages.BOT_USERNAME}" if pages.BOT_USERNAME else "https://t.me/"
+
+    if has_ai and has_omnihr:
+        return {
+            "title": "✅ All set!",
+            "body_html": (
+                f'<p>You\'re fully connected. '
+                f'<a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">'
+                f'Open Telegram →</a> and send a receipt photo or PDF to file your first claim.</p>'
+            ),
+        }
+    if has_ai and not has_omnihr:
+        return {
+            "title": "✅ Step 1 of 3 done — AI connected",
+            "body_html": (
+                '<p style="color:#ccc"><strong>Two more steps to go:</strong></p>'
+                '<p><strong>2.</strong> '
+                '<a href="/extension" style="color:#8b6cff;font-weight:600">Install the Chrome extension</a> '
+                '(download, unzip, load in Chrome → Developer mode → Load unpacked).</p>'
+                f'<p><strong>3.</strong> Back in '
+                f'<a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">Telegram</a>, '
+                'send <code>/pair</code>. You\'ll get a 6-digit code — paste it into the extension while signed in to omnihr.co.</p>'
+            ),
+        }
+    # AI not yet connected — unusual on this page, but handle gracefully
+    return {
+        "title": "Progress saved",
+        "body_html": (
+            f'<p><a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">'
+            f'Go back to Telegram</a> and send /login to connect your AI.</p>'
+        ),
+    }
+
+
 def _next_step_prompt(user_db_id: int, u: dict | None) -> str:
     """Return the single next-step message a user should see, based on what
     they've completed. Opinionated: one step at a time, no menu."""
@@ -1240,59 +1280,62 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
   <h1>💰 ExpenseBot</h1>
   <div class="sub">Connect your AI to parse receipts</div>
 
-  <!-- OPTION 1: Claude subscription -->
+  <!-- Single combined view: open Claude in new tab, come back, paste here -->
   <div id="s1">
-    <a class="btn" href="{oauth}" id="authBtn" target="_blank">Sign in with Claude subscription →</a>
+    <p style="color:#ccc;font-size:13px;margin-bottom:4px"><strong style="color:#fff">Step 1 —</strong> open Claude and authorize (in a new tab)</p>
+    <a class="btn" href="{oauth}" id="authBtn" target="_blank" rel="noopener">Open Claude Login →</a>
     <p class="small">Uses your existing Claude Pro/Max plan. No extra billing.</p>
 
-    <div class="or">or</div>
+    <p style="color:#ccc;font-size:13px;margin:18px 0 4px"><strong style="color:#fff">Step 2 —</strong> come back here and paste the code</p>
+    <input id="url" placeholder="Paste the authentication code here…" autocomplete="off">
+    <button onclick="submitCode()">Complete Login</button>
+    <div id="st"></div>
 
-    <!-- OPTION 2: API key -->
-    <p style="color:#ccc;font-size:13px">Paste an Anthropic API key:</p>
+    <div class="or">or use an API key instead</div>
+
     <input id="apikey" placeholder="sk-ant-api03-..." autocomplete="off">
     <button class="btn2" onclick="submitKey()">Use API Key</button>
     <p class="small">Get one at <a href="https://console.anthropic.com/settings/keys" style="color:#6699cc">console.anthropic.com</a>.</p>
   </div>
 
-  <!-- STEP 2: paste token -->
-  <div id="s2" class="hide">
-    <p style="color:#eee">✅ Authorized! Now paste the token:</p>
-    <p class="small">Tap "Copy Code" on the page, then paste it here</p>
-    <input id="url" placeholder="Paste the authentication code here…" autocomplete="off" autofocus>
-    <button onclick="submitCode()">Complete Login</button>
-    <div id="st"></div>
-  </div>
-
-  <!-- DONE -->
+  <!-- DONE (rendered dynamically from server response) -->
   <div id="s3" class="hide">
     <div class="ok">
-      <h2>✅ Connected!</h2>
-      <p style="color:#aaa;margin-top:8px">Go back to Telegram — send a receipt to test.</p>
+      <h2 id="s3-title">✅ Connected!</h2>
+      <div id="s3-body" style="margin-top:10px"></div>
     </div>
   </div>
 </div>
 <script>
 const S='{s}';
+function showSuccess(next){{
+  document.getElementById('s1').classList.add('hide');
+  document.getElementById('s3').classList.remove('hide');
+  if(next){{
+    if(next.title) document.getElementById('s3-title').textContent = next.title;
+    if(next.body_html) document.getElementById('s3-body').innerHTML = next.body_html;
+  }}
+}}
+function clearErrors(){{
+  const st=document.getElementById('st'); if(st) st.innerHTML='';
+}}
+// When user comes back from the Claude tab, focus the paste field.
 document.getElementById('authBtn').addEventListener('click',function(){{
-  setTimeout(()=>{{
-    document.getElementById('s1').classList.add('hide');
-    document.getElementById('s2').classList.remove('hide');
-  }},500);
+  setTimeout(()=>{{ try{{ document.getElementById('url').focus(); }}catch(e){{}} }},400);
 }});
 window.addEventListener('focus',function(){{
-  if(!document.getElementById('s1').classList.contains('hide')) return;
-  document.getElementById('s1').classList.add('hide');
-  document.getElementById('s2').classList.remove('hide');
+  const u=document.getElementById('url');
+  if(u && !u.value) u.focus();
 }});
 async function post(url,body){{
   const r=await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
   return [r, await r.json()];
 }}
 async function submitCode(){{
+  clearErrors();
   const input=document.getElementById('url').value.trim();
   const st=document.getElementById('st');
   let code=null;
-  // Handle: ?code=XXX (URL), code#state (displayed token), or raw code
   const urlMatch=input.match(/[?&]code=([A-Za-z0-9_\\-]+)/);
   const hashMatch=input.match(/^([A-Za-z0-9_\\-]+)#/);
   if(urlMatch) code=urlMatch[1];
@@ -1301,16 +1344,21 @@ async function submitCode(){{
   if(!code){{st.innerHTML='<div class="err">Couldn\\'t find the code. Tap "Copy Code" on the auth page and paste here.</div>';return;}}
   try{{
     const[r,d]=await post('/auth/complete',{{session:S,code:code}});
-    if(r.ok&&d.ok){{document.getElementById('s2').classList.add('hide');document.getElementById('s3').classList.remove('hide');}}
+    if(r.ok&&d.ok){{ showSuccess(d.next); }}
+    else if(r.status===404){{
+      st.innerHTML='<div class="err">Login session expired (took too long or server restarted). '
+        +'Head back to Telegram and send <code>/login</code> again — this only takes a few seconds.</div>';
+    }}
     else st.innerHTML='<div class="err">'+(d.detail||'Failed')+'</div>';
   }}catch(e){{st.innerHTML='<div class="err">'+e.message+'</div>';}}
 }}
 async function submitKey(){{
+  clearErrors();
   const key=document.getElementById('apikey').value.trim();
   if(!key.startsWith('sk-ant-')){{alert('Key should start with sk-ant-');return;}}
   try{{
     const[r,d]=await post('/auth/setkey',{{session:S,key:key}});
-    if(r.ok&&d.ok){{document.getElementById('s1').classList.add('hide');document.getElementById('s3').classList.remove('hide');}}
+    if(r.ok&&d.ok){{ showSuccess(d.next); }}
     else alert(d.detail||'Failed');
   }}catch(e){{alert(e.message);}}
 }}
@@ -1358,7 +1406,8 @@ async function submitKey(){{
             except Exception as e:
                 log.warning("couldn't DM after login: %s", e)
 
-        return {"ok": True}
+        u = storage.get_user(token_data["user_db_id"])
+        return {"ok": True, "next": _web_next_step_html(token_data["user_db_id"], u)}
 
     @app.post("/auth/setkey")
     async def auth_setkey(payload: dict[str, Any]) -> dict:
@@ -1374,9 +1423,9 @@ async function submitKey(){{
             raise HTTPException(400, "Invalid key format. Should start with sk-ant-")
 
         storage.set_anth_key(pending.user_db_id, key)
+        u = storage.get_user(pending.user_db_id)
         if tg_app:
             try:
-                u = storage.get_user(pending.user_db_id)
                 await tg_app.bot.send_message(
                     chat_id=pending.telegram_user_id,
                     text=(
@@ -1388,7 +1437,7 @@ async function submitKey(){{
                 )
             except Exception:
                 pass
-        return {"ok": True}
+        return {"ok": True, "next": _web_next_step_html(pending.user_db_id, u)}
 
     @app.get("/favicon.ico")
     @app.get("/favicon.svg")
