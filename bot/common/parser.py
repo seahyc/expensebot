@@ -163,14 +163,18 @@ async def parse_receipt(
 
 def _file_block(file_bytes: bytes, media_type: str) -> dict[str, Any]:
     b64 = base64.b64encode(file_bytes).decode()
-    if media_type == "application/pdf":
+    # Detect PDF by magic bytes — MIME from Telegram is unreliable
+    is_pdf = file_bytes[:5] == b"%PDF-" or media_type == "application/pdf"
+    if is_pdf:
         return {
             "type": "document",
-            "source": {"type": "base64", "media_type": media_type, "data": b64},
+            "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
         }
+    # Default to image. Normalize common MIME variants Claude accepts.
+    img_mime = media_type if media_type in ("image/jpeg", "image/png", "image/gif", "image/webp") else "image/jpeg"
     return {
         "type": "image",
-        "source": {"type": "base64", "media_type": media_type, "data": b64},
+        "source": {"type": "base64", "media_type": img_mime, "data": b64},
     }
 
 
