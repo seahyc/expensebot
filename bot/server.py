@@ -186,15 +186,55 @@ def load_skill(hrms: str = "omnihr") -> str:
     return path.read_text() if path.exists() else ""
 
 
-WELCOME = (
-    "🧾 *ExpenseBot*\n"
-    "File OmniHR expense claims right from Telegram.\n\n"
-    "*Quick setup (2 min):*\n\n"
-    "1️⃣ /login — connect your Claude AI (for receipt parsing)\n"
-    "2️⃣ /pair — connect your OmniHR account ([install extension first](https://expensebot.seahyingcong.com/extension))\n\n"
-    "Then just send me a receipt photo or PDF. I'll parse, classify, and file it.\n\n"
-    "Or ask me anything: _\"how much did I spend in April?\"_"
+STEP1_PROMPT = (
+    "🧾 *Welcome to ExpenseBot!*\n"
+    "I file OmniHR expense claims from Telegram. Setup takes ~2 minutes — "
+    "I'll walk you through it one step at a time.\n\n"
+    "*Step 1 of 3 — connect your AI*\n"
+    "Send /login to connect your Claude Pro/Max subscription (or paste an API key). "
+    "This powers the AI that reads your receipts."
 )
+
+STEP2_PROMPT = (
+    "*Step 2 of 3 — install the Chrome extension*\n"
+    "The extension securely hands off your OmniHR login to the bot.\n\n"
+    "👉 [Install it here](https://expensebot.seahyingcong.com/extension) (30 seconds: download, unzip, load in Chrome → Developer mode → Load unpacked).\n\n"
+    "Once it's installed, come back and I'll walk you through step 3."
+)
+
+STEP3_PROMPT = (
+    "*Step 3 of 3 — pair your OmniHR account*\n"
+    "1. Open any [omnihr.co](https://app.omnihr.co) tab and make sure you're signed in (Google SSO is fine).\n"
+    "2. Send /pair here — I'll reply with a 6-digit code.\n"
+    "3. On the omnihr.co tab, click the *ExpenseBot* extension icon (use the puzzle-piece menu if you haven't pinned it) → paste the code → *Pair*.\n\n"
+    "That's it — I'll confirm once we're connected."
+)
+
+READY_PROMPT = (
+    "👋 You're all set up!\n\n"
+    "Send a receipt photo or PDF to file your first claim — add a caption like "
+    "_\"client lunch\"_ for context.\n\n"
+    "*Other things you can do:*\n"
+    "• /list — your recent claims\n"
+    "• /list approved — filter by status\n"
+    "• Ask questions: _\"how much did I spend in April?\"_\n"
+    "• Take action: _\"submit claim 126758\"_ · _\"delete the grab one\"_"
+)
+
+
+def _next_step_prompt(user_db_id: int, u: dict | None) -> str:
+    """Return the single next-step message a user should see, based on what
+    they've completed. Opinionated: one step at a time, no menu."""
+    has_ai = bool(storage.get_anth_key(user_db_id))
+    has_omnihr = bool(u and u.get("access_jwt"))
+    if not has_ai:
+        return STEP1_PROMPT
+    if not has_omnihr:
+        # Step 2 (install extension) and step 3 (pair) are shown together here
+        # because step 2 has no signal we can detect — the user just reads and
+        # installs. After they install, they'll already see step 3 beneath it.
+        return STEP2_PROMPT + "\n\n" + STEP3_PROMPT
+    return READY_PROMPT
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -202,33 +242,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
     u = storage.get_user(user_db_id)
-
-    # Personalize if already set up
-    has_ai = bool(storage.get_anth_key(user_db_id))
-    has_omnihr = bool(u and u.get("access_jwt"))
-
-    if has_ai and has_omnihr:
-        await update.message.reply_text(
-            "👋 Welcome back! You're all set up.\n"
-            "Send a receipt or ask me anything.",
-            parse_mode="Markdown",
-        )
-    elif has_ai:
-        await update.message.reply_text(
-            "👋 AI connected! One more step:\n\n"
-            "2️⃣ /pair — connect your OmniHR account "
-            "([install extension](https://expensebot.seahyingcong.com/extension) first)",
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-        )
-    elif has_omnihr:
-        await update.message.reply_text(
-            "👋 OmniHR connected! One more step:\n\n"
-            "1️⃣ /login — connect your Claude AI for receipt parsing",
-            parse_mode="Markdown",
-        )
-    else:
-        await update.message.reply_text(WELCOME, parse_mode="Markdown", disable_web_page_preview=True)
+    await update.message.reply_text(
+        _next_step_prompt(user_db_id, u),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -286,7 +304,12 @@ async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Key looks invalid: {e}")
         return
     storage.set_anth_key(user_db_id, key)
-    await update.message.reply_text("✅ Key saved. Next: /pair")
+    u = storage.get_user(user_db_id)
+    await update.message.reply_text(
+        "✅ *Step 1 of 3 done — AI connected.*\n\n" + _next_step_prompt(user_db_id, u),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -709,7 +732,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     u = storage.get_user_by_channel("telegram", str(msg.from_user.id))
     if not u:
-        await msg.reply_text("Hi! Run /start first.")
+        # First-ever message — kick straight into the guided flow.
+        user_db_id = storage.upsert_user("telegram", str(msg.from_user.id))
+        u = storage.get_user(user_db_id)
+        await msg.reply_text(
+            _next_step_prompt(user_db_id, u),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
         return
 
     text = (msg.text or "").strip()
@@ -732,9 +762,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ok, err_msg, token_data = await claude_oauth.exchange_code(oauth_state, oauth_code)
         if ok and token_data:
             storage.set_anth_key(token_data["user_db_id"], token_data["access_token"])
+            u = storage.get_user(token_data["user_db_id"])
             await progress.edit_text(
-                "✅ Claude subscription linked!\n"
-                "Send a receipt to test."
+                "✅ *Step 1 of 3 done — Claude subscription linked.*\n\n"
+                + _next_step_prompt(token_data["user_db_id"], u),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
             )
         else:
             await progress.edit_text(f"Login failed: {err_msg}")
@@ -783,16 +816,32 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
     u = storage.get_user_by_channel("telegram", str(msg.from_user.id))
     if not u:
-        await msg.reply_text("Hi! Run /start first.")
+        # First-ever message — kick straight into the guided flow.
+        user_db_id = storage.upsert_user("telegram", str(msg.from_user.id))
+        u = storage.get_user(user_db_id)
+        await msg.reply_text(
+            _next_step_prompt(user_db_id, u),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
         return
 
     try:
         anth = anthropic_for(u)
     except RuntimeError:
-        await msg.reply_text("Connect first: /login")
+        await msg.reply_text(
+            "I can't read receipts until we connect an AI.\n\n" + _next_step_prompt(u["id"], u),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
         return
     if not u.get("access_jwt"):
-        await msg.reply_text("Not paired with OmniHR yet — run /pair")
+        await msg.reply_text(
+            "AI is connected but I can't file claims until you link OmniHR.\n\n"
+            + _next_step_prompt(u["id"], u),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
         return
 
     # Download file
@@ -1179,16 +1228,19 @@ async function submitKey(){{
         storage.set_anth_key(token_data["user_db_id"], token_data["access_token"])
         # TODO: also store refresh_token for auto-refresh
 
-        # DM the user
+        # DM the user and nudge them into step 2
         if tg_app:
             try:
+                u = storage.get_user(token_data["user_db_id"])
                 await tg_app.bot.send_message(
                     chat_id=token_data["telegram_user_id"],
                     text=(
-                        "✅ Claude subscription linked!\n"
-                        "Your receipts will be parsed using your Claude plan — no API key needed.\n"
-                        "Send a receipt to test."
+                        "✅ *Step 1 of 3 done — Claude subscription linked.*\n"
+                        "Receipts will be parsed using your Claude plan — no API key needed.\n\n"
+                        + _next_step_prompt(token_data["user_db_id"], u)
                     ),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
                 )
             except Exception as e:
                 log.warning("couldn't DM after login: %s", e)
@@ -1211,9 +1263,15 @@ async function submitKey(){{
         storage.set_anth_key(pending.user_db_id, key)
         if tg_app:
             try:
+                u = storage.get_user(pending.user_db_id)
                 await tg_app.bot.send_message(
                     chat_id=pending.telegram_user_id,
-                    text="✅ API key saved! Send a receipt to test.",
+                    text=(
+                        "✅ *Step 1 of 3 done — API key saved.*\n\n"
+                        + _next_step_prompt(pending.user_db_id, u)
+                    ),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
                 )
             except Exception:
                 pass
@@ -1319,17 +1377,19 @@ async function submitKey(){{
             tenant_id=tenant_id,
         )
 
-        # DM the user via Telegram
+        # DM the user via Telegram — this is the payoff message after all 3 steps
         if tg_app:
             user = storage.get_user(user_db_id)
             try:
                 await tg_app.bot.send_message(
                     chat_id=int(user["channel_user_id"]),
                     text=(
-                        f"✅ Paired as {me.get('full_name','?')} "
-                        f"({tenant_id}, employee #{me.get('id')}).\n"
-                        f"Send any receipt photo or PDF to file your first claim."
+                        f"✅ *Step 3 of 3 done — paired as {me.get('full_name','?')} "
+                        f"({tenant_id}, employee #{me.get('id')}).*\n\n"
+                        + READY_PROMPT
                     ),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
                 )
             except Exception as e:
                 log.warning("Couldn't DM paired user: %s", e)
