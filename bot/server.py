@@ -190,25 +190,85 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME)
 
 
+_login_procs: dict[str, asyncio.subprocess.Process] = {}  # session_id → proc
+
+
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start OAuth PKCE flow — user taps link, authorizes, auto-redirected back."""
+    """Start Claude login via our web page bridge."""
     if not await _gate(update):
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    tid = update.effective_user.id
 
-    auth_url, state = claude_oauth.start_login(
-        telegram_user_id=update.effective_user.id,
-        user_db_id=user_db_id,
-        public_base_url=PUBLIC_BASE_URL,
+    progress = await update.message.reply_text("⏳ Starting login…")
+
+    # Start claude auth login on the server
+    proc = await asyncio.subprocess.create_subprocess_exec(
+        "claude", "auth", "login", "--claudeai",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        stdin=asyncio.subprocess.PIPE,
     )
 
-    await update.message.reply_text(
-        f"[👆 Tap here to sign in with Claude]({auth_url})\n\n"
-        f"After authorizing, you'll be redirected back automatically.\n"
-        f"_(link expires in 10 minutes)_",
+    # Extract the OAuth URL
+    oauth_url = None
+    try:
+        while True:
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
+            if not line:
+                break
+            text = line.decode().strip()
+            log.info("claude login: %s", text[:100])
+            if "https://" in text:
+                import re
+                urls = re.findall(r'https://[^\s]+', text)
+                if urls:
+                    oauth_url = urls[0]
+                    break
+    except asyncio.TimeoutError:
+        pass
+
+    if not oauth_url:
+        await progress.edit_text("Couldn't start login. Try again.")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
+
+    # Store proc keyed by a session for the web page to complete
+    session_id = secrets.token_urlsafe(16)
+    _login_procs[session_id] = proc
+    # Also store user mapping
+    claude_oauth._pending[session_id] = claude_oauth.PendingAuth(
+        state=session_id,
+        code_verifier="",  # not used in this flow
+        redirect_uri="",
+        telegram_user_id=tid,
+        user_db_id=user_db_id,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    bridge_url = f"{PUBLIC_BASE_URL}/auth/start?s={session_id}&oauth={oauth_url}"
+
+    await progress.edit_text(
+        f"[👆 Tap to sign in with Claude]({bridge_url})\n\n"
+        f"_(opens a page that guides you through — takes 30 seconds)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
+
+    # Auto-cleanup after 10 min
+    async def _cleanup():
+        await asyncio.sleep(600)
+        if session_id in _login_procs:
+            try:
+                _login_procs[session_id].kill()
+            except Exception:
+                pass
+            _login_procs.pop(session_id, None)
+            claude_oauth._pending.pop(session_id, None)
+    asyncio.create_task(_cleanup())
 
 
 async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -948,56 +1008,142 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
             "- [Terms](/terms)  ·  [Privacy](/privacy)\n",
         )
 
-    @app.get("/auth/callback")
-    async def auth_callback(code: str = "", state: str = "") -> HTMLResponse:
-        """OAuth callback — Claude redirects here after user authorizes."""
-        if not code or not state:
-            return HTMLResponse("<h1>Missing code or state</h1><p>Try /login again.</p>", status_code=400)
+    @app.get("/auth/start")
+    async def auth_start(s: str = "", oauth: str = "") -> HTMLResponse:
+        """Bridge page: guides user through OAuth + captures callback URL."""
+        if not s or not oauth:
+            return HTMLResponse("<h1>Invalid link</h1><p>Try /login again.</p>", status_code=400)
+        page = f"""<!doctype html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ExpenseBot — Sign in</title>
+<style>
+  *{{margin:0;padding:0;box-sizing:border-box}}
+  body{{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#eee;
+       min-height:100vh;display:flex;align-items:center;justify-content:center}}
+  .c{{background:#16213e;border-radius:16px;padding:28px;max-width:400px;width:92%;text-align:center}}
+  h1{{font-size:20px;margin-bottom:12px}}
+  p{{font-size:14px;color:#aaa;margin:12px 0;line-height:1.5}}
+  a.btn{{display:block;background:#6633ee;color:#fff;padding:14px;border-radius:8px;
+        text-decoration:none;font-size:16px;font-weight:600;margin:16px 0}}
+  input{{width:100%;padding:12px;border-radius:8px;border:1px solid #333;
+        background:#0f3460;color:#eee;font-size:13px;margin:8px 0}}
+  button{{width:100%;padding:14px;border-radius:8px;border:0;background:#6633ee;
+         color:#fff;font-size:16px;font-weight:600;cursor:pointer;margin:8px 0}}
+  button:disabled{{background:#444;cursor:default}}
+  .ok{{background:#1a4d2e;padding:20px;border-radius:12px;margin:16px 0}}
+  .err{{background:#4d1a1a;padding:12px;border-radius:8px;margin:12px 0;font-size:13px}}
+  .hide{{display:none}}
+</style></head><body>
+<div class="c">
+  <h1>🧾 ExpenseBot</h1>
 
-        ok, msg, token_data = await claude_oauth.complete_login(state, code)
+  <div id="s1">
+    <p>Sign in with your Claude subscription</p>
+    <a class="btn" href="{oauth}" id="authBtn">Authorize with Claude →</a>
+    <p style="font-size:12px;color:#666">After authorizing, copy the URL from your browser's address bar and paste it below.</p>
+  </div>
 
-        if ok and token_data:
-            # Store the subscription token
-            user_db_id = token_data["user_db_id"]
-            access = token_data["access_token"]
-            storage.set_anth_key(user_db_id, access)
+  <div id="s2" class="hide">
+    <p style="color:#eee">✅ Authorized! Now paste the callback URL:</p>
+    <input id="url" placeholder="https://platform.claude.com/oauth/code/callback?code=..." autocomplete="off" autofocus>
+    <button id="btn" onclick="go()">Complete Login</button>
+    <div id="st"></div>
+  </div>
 
-            # DM the user via Telegram
-            if tg_app:
-                tid = token_data["telegram_user_id"]
-                try:
-                    await tg_app.bot.send_message(
-                        chat_id=tid,
-                        text=(
-                            "✅ Claude subscription linked!\n"
-                            "Your receipts will be parsed using your Claude plan — no API key needed.\n"
-                            "Send a receipt to test."
-                        ),
-                    )
-                except Exception as e:
-                    log.warning("couldn't DM after login: %s", e)
+  <div id="s3" class="hide">
+    <div class="ok">
+      <h2>✅ Logged in!</h2>
+      <p style="color:#aaa;margin-top:8px">Go back to Telegram — your bot is ready.</p>
+    </div>
+  </div>
+</div>
+<script>
+document.getElementById('authBtn').addEventListener('click',function(){{
+  setTimeout(()=>{{
+    document.getElementById('s1').classList.add('hide');
+    document.getElementById('s2').classList.remove('hide');
+  }},500);
+}});
+window.addEventListener('focus',function(){{
+  if(!document.getElementById('s1').classList.contains('hide')) return;
+  document.getElementById('s2').classList.remove('hide');
+}});
+async function go(){{
+  const input=document.getElementById('url').value.trim();
+  const st=document.getElementById('st');
+  const btn=document.getElementById('btn');
+  let code=null;
+  const m=input.match(/[?&]code=([A-Za-z0-9_\\-]+)/);
+  if(m) code=m[1];
+  else if(input.length>20&&/^[A-Za-z0-9_\\-]+$/.test(input)) code=input;
+  if(!code){{st.innerHTML='<div class="err">Couldn\\'t find the code. Paste the full URL from the address bar.</div>';return;}}
+  btn.disabled=true;btn.textContent='Completing…';
+  try{{
+    const r=await fetch('/auth/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{session:'{s}',code:code}})}});
+    const d=await r.json();
+    if(r.ok&&d.ok){{
+      document.getElementById('s2').classList.add('hide');
+      document.getElementById('s3').classList.remove('hide');
+    }}else{{
+      st.innerHTML='<div class="err">'+(d.detail||'Failed. Try /login again.')+'</div>';
+      btn.disabled=false;btn.textContent='Complete Login';
+    }}
+  }}catch(e){{
+    st.innerHTML='<div class="err">'+e.message+'</div>';
+    btn.disabled=false;btn.textContent='Complete Login';
+  }}
+}}
+</script></body></html>"""
+        return HTMLResponse(page)
 
-            return HTMLResponse(
-                "<html><body style='background:#1a1a2e;color:#eee;display:flex;"
-                "align-items:center;justify-content:center;height:100vh;"
-                "font-family:sans-serif'>"
-                "<div style='text-align:center'>"
-                "<h1>✅ Logged in!</h1>"
-                "<p>Go back to Telegram — your bot is ready.</p>"
-                "</div></body></html>"
-            )
-        else:
-            return HTMLResponse(
-                f"<html><body style='background:#1a1a2e;color:#eee;display:flex;"
-                f"align-items:center;justify-content:center;height:100vh;"
-                f"font-family:sans-serif'>"
-                f"<div style='text-align:center'>"
-                f"<h1>❌ Login failed</h1>"
-                f"<p>{msg}</p>"
-                f"<p>Go back to Telegram and try /login again.</p>"
-                f"</div></body></html>",
-                status_code=400,
-            )
+    @app.post("/auth/complete")
+    async def auth_complete(payload: dict[str, Any]) -> dict:
+        """Receive the OAuth code from the bridge page, feed to claude auth login."""
+        session_id = payload.get("session", "")
+        code = payload.get("code", "")
+        if not session_id or not code:
+            raise HTTPException(400, "Missing session or code")
+
+        proc = _login_procs.pop(session_id, None)
+        pending = claude_oauth._pending.pop(session_id, None)
+        if not proc or not pending:
+            raise HTTPException(404, "Session expired. Run /login again.")
+
+        # Feed code to claude auth login stdin
+        try:
+            proc.stdin.write((code + "\n").encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+            returncode = await asyncio.wait_for(proc.wait(), timeout=30)
+        except Exception as e:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise HTTPException(500, f"Login subprocess failed: {e}")
+
+        if returncode != 0:
+            raise HTTPException(400, f"Login failed (exit {returncode}). Try /login again.")
+
+        # Mark user as using subscription
+        storage.set_anth_key(pending.user_db_id, "__claude_subscription__")
+
+        # DM the user
+        if tg_app:
+            try:
+                await tg_app.bot.send_message(
+                    chat_id=pending.telegram_user_id,
+                    text=(
+                        "✅ Claude subscription linked!\n"
+                        "Your receipts will be parsed using your Claude plan — no API key needed.\n"
+                        "Send a receipt to test."
+                    ),
+                )
+            except Exception as e:
+                log.warning("couldn't DM after login: %s", e)
+
+        return {"ok": True}
 
     @app.get("/terms", response_class=HTMLResponse)
     async def terms() -> str:

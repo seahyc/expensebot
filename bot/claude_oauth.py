@@ -36,6 +36,12 @@ TOKEN_URL = "https://claude.com/cai/oauth/token"
 
 SCOPES = "user:profile user:inference"
 
+# Since Anthropic's OAuth rejects third-party redirect_uri, we use a hybrid approach:
+# 1. We run `claude auth login` on the server (which uses the registered redirect_uri)
+# 2. Our web page guides the user through: authorize → copy callback URL → paste on our page
+# 3. Our page extracts the code and POSTs to our backend
+# 4. Backend feeds the code to the `claude auth login` subprocess to complete
+
 # In-memory pending sessions: {state: PendingAuth}
 _pending: dict[str, "PendingAuth"] = {}
 
