@@ -87,7 +87,10 @@ def load_tenant_md(tenant_id: str | None) -> str:
 
 
 def load_user_md(_user: dict) -> str:
-    return _user.get("user_md") or "(no per-user rules yet)"
+    """Return the user's memory — falls back to the scaffold template so the
+    agent always sees the five section headers and can slot new entries in."""
+    stored = (_user.get("user_md") or "").strip()
+    return stored if stored else storage.DEFAULT_MEMORY_TEMPLATE
 
 
 # ---------------------------------------------------------------------------
@@ -611,40 +614,49 @@ async def cmd_submit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"Submit failed: {e}\nThe action code may need probing — try via web UI once and tell me.")
 
 
-async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_memories(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show what the bot has learned about the user. They can modify it by
+    talking to the bot in plain English — the agent has an update_memories tool."""
     if not await _gate(update):
         return
     u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
     if not u:
-        await update.message.reply_text("No account to export.")
+        await update.message.reply_text("Run /start first.")
         return
-    data = storage.export_user_data(u["id"])
-    import io, json
-    buf = io.BytesIO(json.dumps(data, indent=2, default=str).encode())
-    buf.name = "expensebot-export.json"
-    await update.message.reply_document(document=buf, filename=buf.name)
-
-
-async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _gate(update):
-        return
-    # Two-step: first /delete-account replies with a warning; second "CONFIRM"
-    # within 60s actually purges.
-    u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
-    if not u:
-        await update.message.reply_text("No account to delete.")
-        return
-    text = " ".join(ctx.args) if ctx.args else ""
-    if text.strip().upper() != "CONFIRM":
+    memories = storage.get_user_md(u["id"]) or ""
+    if not memories.strip():
         await update.message.reply_text(
-            "This wipes your key, OmniHR tokens, parsed receipts (claims on "
-            "OmniHR are not affected — you filed those yourself).\n\n"
-            "To proceed, send: `/delete-account CONFIRM`",
+            "_I haven't remembered anything yet._\n\n"
+            "As you correct my classifications, I'll ask if I should remember — "
+            "you approve, I save it. Or just tell me: "
+            "_\"remember that Grab rides after 10pm are personal.\"_",
             parse_mode="Markdown",
         )
         return
-    storage.delete_user(u["id"])
-    await update.message.reply_text("✅ Account purged.")
+
+    # Telegram caps a message at 4096 chars. Reserve ~200 chars for the
+    # header + footer and the code-block wrapping.
+    HEADER = "*What I remember about you:*\n\n"
+    FOOTER = "\n_Tell me what to change and I'll update it._"
+    wrapped = f"```\n{memories}\n```"
+
+    if len(HEADER) + len(wrapped) + len(FOOTER) <= 4000:
+        await update.message.reply_text(
+            HEADER + wrapped + FOOTER,
+            parse_mode="Markdown",
+        )
+        return
+
+    # Too long for a single message — send as an attached file so the user
+    # sees every byte, then a short explainer.
+    import io
+    buf = io.BytesIO(memories.encode("utf-8"))
+    buf.name = "memories.md"
+    await update.message.reply_document(
+        document=buf,
+        filename="memories.md",
+        caption="Full memory attached. Tell me what to change and I'll update it.",
+    )
 
 
 async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_type: str = "", filename: str = ""):
@@ -700,6 +712,29 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             async with client_for(u) as client:
                 await client.delete_submission(cid)
             return f"Deleted #{cid}."
+
+        elif tool_name == "update_memories":
+            new_md = tool_input.get("new_markdown", "")
+            change = tool_input.get("change_summary", "")
+            if not new_md.strip():
+                return "Refused: new_markdown was empty."
+            # Sanity check — the five section headers must survive the round-trip
+            required = [
+                "## Classification rules",
+                "## Merchant shortcuts",
+                "## Defaults",
+                "## Description style",
+                "## Don't ask me about",
+            ]
+            missing = [h for h in required if h not in new_md]
+            if missing:
+                return (
+                    f"Refused: markdown is missing required section header(s): "
+                    f"{missing}. Preserve all five headers from the template."
+                )
+            storage.set_user_md(u["id"], new_md)
+            log.info("memory updated for user=%s: %s", u["id"], change)
+            return f"Saved. Summary: {change}"
 
         elif tool_name == "get_claim_summary":
             async with client_for(u) as client:
@@ -788,6 +823,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     progress = await msg.reply_text("🤔")
     tenant_md = load_tenant_md(u.get("tenant_id"))
+    user_md = load_user_md(u)
     executor = await _build_tool_executor(u)
 
     try:
@@ -796,6 +832,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             user_message=text,
             has_file=False,
             tenant_md=tenant_md,
+            user_md=user_md,
             recent_claims="(agent will fetch via tools if needed)",
             tool_executor=executor,
         )
@@ -1418,8 +1455,7 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("list", cmd_list))
     tg_app.add_handler(CommandHandler("delete", cmd_delete))
     tg_app.add_handler(CommandHandler("submit", cmd_submit))
-    tg_app.add_handler(CommandHandler("export_me", cmd_export))
-    tg_app.add_handler(CommandHandler("delete_account", cmd_delete_account))
+    tg_app.add_handler(CommandHandler("memories", cmd_memories))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
@@ -1444,6 +1480,20 @@ async def run() -> None:
         log.info("telegram bot identified as @%s", me.username)
     except Exception:
         log.exception("could not resolve telegram bot username; pages will show fallback copy")
+
+    # Set the command menu so users see /list, /memories, etc. when typing /
+    try:
+        from telegram import BotCommand
+        await tg_app.bot.set_my_commands([
+            BotCommand("start", "Welcome & setup"),
+            BotCommand("login", "Connect your Claude AI"),
+            BotCommand("pair", "Link your OmniHR account"),
+            BotCommand("list", "Show your recent claims"),
+            BotCommand("memories", "What I remember about you"),
+        ])
+    except Exception:
+        log.exception("could not set telegram command menu")
+
     await tg_app.start()
     polling_task = asyncio.create_task(
         tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)

@@ -75,6 +75,34 @@ TOOLS = [
         },
     },
     {
+        "name": "update_memories",
+        "description": (
+            "Replace the user's memory markdown — the file shown by /memories. "
+            "Call this ONLY after the user has explicitly confirmed a proposed "
+            "change in the same conversation turn. Takes the FULL new markdown, "
+            "not a diff. You MUST preserve the five section headers "
+            "(Classification rules, Merchant shortcuts, Defaults, "
+            "Description style, Don't ask me about) and their italic blurbs. "
+            "Entries go under the right section as one-liner bullets in the "
+            "format: **Short rule** — why (YYYY-MM-DD). Remove '- (none yet)' "
+            "placeholders once a section has a real entry."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "new_markdown": {
+                    "type": "string",
+                    "description": "The full replacement markdown — all five sections, headers intact.",
+                },
+                "change_summary": {
+                    "type": "string",
+                    "description": "One short line, e.g. 'Added to Classification rules: Grab after 10pm → Personal'.",
+                },
+            },
+            "required": ["new_markdown", "change_summary"],
+        },
+    },
+    {
         "name": "get_claim_summary",
         "description": (
             "Get a summary of the user's expense history — totals by status, "

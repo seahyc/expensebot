@@ -132,7 +132,8 @@ def terms_page() -> str:
 
   <h2>We can stop serving you</h2>
   <p>if you abuse the bot (spam, attempt to bypass tenant isolation, etc.).
-  You can stop using it at any time with <code>/delete-account</code>.</p>
+  You can stop using it any time by just walking away — ping the maintainer
+  via GitHub if you want your data purged.</p>
 """)
 
 
@@ -178,8 +179,11 @@ def privacy_page() -> str:
 
   <h2>Your controls</h2>
   <ul>
-    <li><code>/export-me</code> — JSON dump of everything we have on you</li>
-    <li><code>/delete-account</code> — purges your row, tokens, keys, and receipt records</li>
+    <li><code>/memories</code> — read everything the bot has remembered about
+    your preferences; edit or remove entries by talking to it.</li>
+    <li>Want your data deleted or exported? Open a GitHub issue (link below)
+    and I'll run it by hand — low enough volume that automating it isn't
+    worth the footgun risk.</li>
   </ul>
 
   <h2>Contact</h2>

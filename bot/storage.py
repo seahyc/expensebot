@@ -150,6 +150,57 @@ def set_anth_key(user_id: int, key: str) -> None:
         conn.execute("UPDATE users SET anth_key=? WHERE id=?", (crypto.encrypt(key), user_id))
 
 
+# Memory structure borrowed from Claude Code's auto-memory system:
+#   - Categorical sections (like Claude Code's user/feedback/project/reference types)
+#   - Each entry is ONE line: **Bold rule** — short reason (date)
+#   - Stale entries can be updated in place by date
+#   - "Don't ask" section is the escape hatch for one-offs
+# Why this shape (vs free-form markdown): predictable slots for the agent to
+# append to, and human-skimmable when the user hits /memories.
+DEFAULT_MEMORY_TEMPLATE = """# ExpenseBot memory
+
+## Classification rules
+_"When X, file as Y" patterns learned from your corrections._
+- (none yet)
+
+## Merchant shortcuts
+_Vendors you file consistently the same way._
+- (none yet)
+
+## Defaults
+_Values to fill when I'm missing one (trip destination, currency, etc.)._
+- (none yet)
+
+## Description style
+_How you like receipt descriptions phrased._
+- (none yet)
+
+## Don't ask me about
+_One-offs you've told me to handle case-by-case instead of memorizing._
+- (none yet)
+"""
+
+
+def set_user_md(user_id: int, markdown: str) -> None:
+    """Persist the user's learned rules/preferences markdown."""
+    with db() as conn:
+        conn.execute("UPDATE users SET user_md=? WHERE id=?", (markdown, user_id))
+
+
+def get_user_md(user_id: int) -> str:
+    """Return the stored memory verbatim — may be empty for a fresh user."""
+    with db() as conn:
+        row = conn.execute("SELECT user_md FROM users WHERE id=?", (user_id,)).fetchone()
+        return (row["user_md"] if row else "") or ""
+
+
+def get_user_md_or_template(user_id: int) -> str:
+    """Return stored memory, falling back to the empty-template scaffold.
+    Used by the agent + /memories so the user always sees a structured file."""
+    stored = get_user_md(user_id)
+    return stored if stored.strip() else DEFAULT_MEMORY_TEMPLATE
+
+
 def get_anth_key(user_id: int) -> str | None:
     with db() as conn:
         row = conn.execute("SELECT anth_key FROM users WHERE id=?", (user_id,)).fetchone()
