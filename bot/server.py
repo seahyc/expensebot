@@ -162,6 +162,9 @@ async def _gate(update: Update) -> bool:
 # Telegram handlers
 # ---------------------------------------------------------------------------
 
+SKILLS_MD = (REPO_ROOT / "bot" / "skills.md").read_text()
+
+
 WELCOME = (
     "Hi! I file OmniHR claims for you.\n\n"
     "Setup:\n"
@@ -550,6 +553,94 @@ async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("✅ Account purged.")
 
 
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Catch-all for free-form text: route through Claude with skills + claims context."""
+    if not await _gate(update):
+        return
+    msg = update.message
+    u = storage.get_user_by_channel("telegram", str(msg.from_user.id))
+    if not u:
+        await msg.reply_text("Hi! Run /start first.")
+        return
+
+    text = (msg.text or "").strip()
+    if not text:
+        return
+
+    # Need Anthropic key for the conversational layer
+    try:
+        anth = anthropic_for(u)
+    except RuntimeError:
+        await msg.reply_text("Set your API key first: /setkey sk-ant-…")
+        return
+
+    if not await _check_rate(update, u["id"], "parse"):
+        return
+
+    # Build context: recent claims from OmniHR (if paired)
+    claims_summary = "(not paired — no claims data available)"
+    if u.get("access_jwt"):
+        try:
+            async with client_for(u) as client:
+                data = await client.list_submissions(page_size=20)
+                rows = data.get("results", [])
+                if rows:
+                    lines = []
+                    for r in rows:
+                        status_label = STATUS_LABELS.get(r.get("status", 0), "?")
+                        lines.append(
+                            f"- #{r['id']} {r.get('receipt_date','?')} "
+                            f"{r.get('amount_currency','?')} {r.get('amount','?')} "
+                            f"{r.get('merchant') or '?'} — {(r.get('policy') or {}).get('name','?')} "
+                            f"[{status_label}] "
+                            f"{(r.get('description') or '')[:60]}"
+                        )
+                    claims_summary = "\n".join(lines)
+                else:
+                    claims_summary = "(no claims found)"
+        except Exception as e:
+            claims_summary = f"(couldn't fetch claims: {e})"
+
+    tenant_md = load_tenant_md(u.get("tenant_id"))
+    user_md = load_user_md(u)
+
+    # Single Claude call — skills.md + tenant + claims as cached context
+    try:
+        resp = await anth.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system=SKILLS_MD,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"## Org rules\n{tenant_md[:2000]}\n\n"
+                                f"## User preferences\n{user_md[:500]}\n\n"
+                                f"## Recent claims\n{claims_summary}\n\n"
+                                f"## User's message\n{text}"
+                            ),
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            ],
+        )
+        reply = resp.content[0].text if resp.content else "I couldn't understand that."
+    except Exception as e:
+        log.warning("conversational reply failed: %s", e)
+        reply = (
+            "I can help with expense claims. Try:\n"
+            "• Send a receipt photo/PDF to file a claim\n"
+            "• /list to see your claims\n"
+            "• Ask me: 'how much did I spend in April?'"
+        )
+
+    await msg.reply_text(reply, parse_mode="Markdown")
+
+
 async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Photo or document arrived. Parse + file as draft."""
     if not await _gate(update):
@@ -894,6 +985,7 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("delete_account", cmd_delete_account))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     async def on_error(update, context):
         log.exception("unhandled error in handler", exc_info=context.error)
