@@ -190,7 +190,7 @@ def load_skill(hrms: str = "omnihr") -> str:
 
 
 STEP1_PROMPT = (
-    "🧾 *Welcome to ExpenseBot!*\n"
+    "💰 *Welcome to ExpenseBot!*\n"
     "I file OmniHR expense claims from Telegram. Setup takes ~2 minutes — "
     "I'll walk you through it one step at a time.\n\n"
     "*Step 1 of 3 — connect your AI*\n"
@@ -1169,7 +1169,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
   .small{{font-size:11px;color:#555;text-align:center;margin-top:4px}}
 </style></head><body>
 <div class="c">
-  <h1>🧾 ExpenseBot</h1>
+  <h1>💰 ExpenseBot</h1>
   <div class="sub">Connect your AI to parse receipts</div>
 
   <!-- OPTION 1: Claude subscription -->
@@ -1317,22 +1317,13 @@ async function submitKey(){{
     @app.get("/favicon.ico")
     @app.get("/favicon.svg")
     async def favicon() -> Response:
-        # Vector receipt on the site's purple card. Avoids emoji <text> because
-        # favicon rasterizers in Chrome/Safari don't reliably fall back to
-        # system color-emoji fonts at 16×16.
+        # Just the 💰 emoji. Modern browsers render emoji in SVG favicons
+        # using the OS's native color-emoji font (Apple on Mac/iOS, Segoe UI
+        # Emoji on Windows, Noto on Linux) — stays visually consistent with
+        # the 💰 used in page headers + bot messages.
         svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
-            '<rect width="64" height="64" rx="12" fill="#6633ee"/>'
-            # Receipt paper with zigzag torn bottom
-            '<path d="M14 12 H50 V46 '
-            'L46 50 L42 46 L38 50 L34 46 L30 50 L26 46 L22 50 L18 46 L14 50 Z" '
-            'fill="#fff"/>'
-            # Lines of "text" on the receipt
-            '<rect x="19" y="20" width="26" height="3" rx="1" fill="#6633ee"/>'
-            '<rect x="19" y="28" width="20" height="2.5" rx="1" fill="#bbb"/>'
-            '<rect x="19" y="34" width="26" height="2.5" rx="1" fill="#bbb"/>'
-            # Amount dash
-            '<rect x="35" y="40" width="10" height="3" rx="1" fill="#6633ee"/>'
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+            '<text y=".9em" font-size="90">\U0001F4B0</text>'
             "</svg>"
         )
         return Response(

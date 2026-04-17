@@ -63,7 +63,7 @@ def styled_page(title: str, body_html: str) -> str:
 def extension_page() -> str:
     handle, link = _bot_link_html()
     return styled_page("Chrome Extension", f"""
-  <h1>🧾 ExpenseBot</h1>
+  <h1>💰 ExpenseBot</h1>
   <div class="sub">Chrome Extension</div>
 
   <p>This extension bridges your OmniHR login to
@@ -109,7 +109,7 @@ def extension_page() -> str:
 
 def terms_page() -> str:
     return styled_page("Terms", f"""
-  <h1>🧾 ExpenseBot</h1>
+  <h1>💰 ExpenseBot</h1>
   <div class="sub">Terms of Service · {date.today().isoformat()}</div>
 
   <p><strong>What this is.</strong> ExpenseBot is an open-source tool
@@ -139,7 +139,7 @@ def terms_page() -> str:
 
 def privacy_page() -> str:
     return styled_page("Privacy", f"""
-  <h1>🧾 ExpenseBot</h1>
+  <h1>💰 ExpenseBot</h1>
   <div class="sub">Privacy Policy · {date.today().isoformat()}</div>
 
   <h2>What we collect</h2>
@@ -195,7 +195,7 @@ def privacy_page() -> str:
 def landing_page() -> str:
     handle, link = _bot_link_html()
     return styled_page("Home", f"""
-  <h1>🧾 ExpenseBot</h1>
+  <h1>💰 ExpenseBot</h1>
   <div class="sub">File OmniHR expense claims from Telegram</div>
 
   <p>Send a receipt photo or PDF → bot parses it with AI → files as a draft on OmniHR.
