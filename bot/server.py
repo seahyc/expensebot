@@ -579,11 +579,20 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for label, value in (parsed.custom_fields or {}).items():
             values[label] = value
         if parsed.suggested_sub_category_label:
-            # Find which custom field is the SINGLE_SELECT for sub-category
             for f in schema.custom_fields():
                 if f.field_type == "SINGLE_SELECT" and "sub" in f.label.lower():
                     values[f.label] = parsed.suggested_sub_category_label
                     break
+
+        # Default trip dates to receipt_date when not provided (common for local same-day trips)
+        for f in schema.custom_fields():
+            if f.is_mandatory and f.field_id not in {ff.field_id for ff in schema.custom_fields() if f.label in values}:
+                label_low = f.label.lower()
+                if "trip start" in label_low or "trip end" in label_low:
+                    if f.label not in values:
+                        values[f.label] = parsed.receipt_date.isoformat()
+                if "destination" in label_low and f.label not in values:
+                    values[f.label] = "Singapore"  # default for local trips
 
         receipts_payload = [{"id": doc_id, "file_path": doc_path}]
         try:
