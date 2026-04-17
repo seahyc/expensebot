@@ -20,13 +20,14 @@ from .tools import TOOLS
 
 log = logging.getLogger(__name__)
 
-# The "You are Claude Code..." opener is required by the Anthropic API when
-# using a Claude-subscription OAuth token (sk-ant-oat...). Without it the
-# server returns an opaque 429 "Error" with no rate-limit headers. Harmless
-# on API-key auth, so we include it unconditionally.
-SYSTEM = """You are Claude Code, Anthropic's official CLI for Claude.
+# The "You are Claude Code..." opener must sit in its OWN system-block when
+# a Claude-subscription OAuth token (sk-ant-oat...) is in play — Anthropic's
+# API gate checks that block literally. Glued to the same string as the
+# ExpenseBot instructions it fails with an opaque 429 "Error" that looks
+# like a rate limit but isn't. Empirically confirmed against a real token.
+CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
-You are ExpenseBot — a Telegram bot that helps employees file and track expense claims on OmniHR.
+SYSTEM = """You are ExpenseBot — a Telegram bot that helps employees file and track expense claims on OmniHR.
 
 RULES:
 - Be concise. 1-3 sentences unless listing data.
@@ -120,7 +121,10 @@ async def run_agent(
             resp = await anthropic.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=1024,
-                system=SYSTEM,
+                system=[
+                    {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+                    {"type": "text", "text": SYSTEM},
+                ],
                 tools=TOOLS,
                 messages=messages,
             )

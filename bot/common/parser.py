@@ -85,12 +85,12 @@ PARSE_TOOL = {
 }
 
 
-# "You are Claude Code..." opener is required for Claude-subscription OAuth
-# tokens; the API gate returns an opaque 429 otherwise. Harmless on API-key
-# auth, so include it unconditionally.
-SYSTEM_PROMPT = """You are Claude Code, Anthropic's official CLI for Claude.
+# Claude Code identity must be its OWN system block (not prepended to a
+# bigger string) when using sk-ant-oat OAuth tokens — Anthropic's gate
+# checks the first block literally. Glued inline → opaque 429 "Error".
+CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
-You parse expense receipts and classify them for filing.
+SYSTEM_PROMPT = """You parse expense receipts and classify them for filing.
 
 Return a single tool call with structured fields. Rules:
 - Be conservative on confidence: below 0.7 = bot will ask user to confirm
@@ -155,7 +155,10 @@ async def parse_receipt(
             resp = await anthropic.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
-                system=SYSTEM_PROMPT,
+                system=[
+                    {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+                    {"type": "text", "text": SYSTEM_PROMPT},
+                ],
                 tools=[PARSE_TOOL],
                 tool_choice={"type": "tool", "name": "file_receipt"},
                 messages=messages,
