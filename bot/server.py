@@ -1181,6 +1181,42 @@ async function submitKey(){{
                 pass
         return {"ok": True}
 
+    @app.get("/extension")
+    async def extension_page() -> HTMLResponse:
+        return HTMLResponse(legal.html_page("ExpenseBot Extension", """
+# Chrome Extension
+
+Install the ExpenseBot Chrome extension to pair your OmniHR account.
+
+## Quick install (Developer mode)
+
+1. [Download extension.zip](/extension/download)
+2. Unzip it
+3. Open `chrome://extensions` in Chrome
+4. Toggle **Developer mode** (top right)
+5. Click **Load unpacked** → select the unzipped `extension` folder
+6. Pin the ExpenseBot icon in your toolbar
+
+Then in Telegram: `/pair` → paste the code into the extension popup.
+
+## What it does
+
+Reads your OmniHR session cookies (after you sign in normally) and securely sends them to ExpenseBot so it can file claims on your behalf. No passwords stored — just session tokens, encrypted at rest.
+"""))
+
+    from fastapi.responses import FileResponse
+
+    @app.get("/extension/download")
+    async def extension_download() -> FileResponse:
+        import subprocess, tempfile
+        # Build fresh zip each time (small, ensures latest code)
+        zip_path = Path(tempfile.gettempdir()) / "expensebot-extension.zip"
+        ext_dir = REPO_ROOT / "extension"
+        subprocess.run(["zip", "-rj", str(zip_path), str(ext_dir)],
+                       capture_output=True, check=True)
+        return FileResponse(zip_path, filename="expensebot-extension.zip",
+                            media_type="application/zip")
+
     @app.get("/terms", response_class=HTMLResponse)
     async def terms() -> str:
         return legal.html_page("expensebot — Terms", legal.TERMS_MD)
