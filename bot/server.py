@@ -676,6 +676,30 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
+    # Detect OAuth token pasted in Telegram (code#state or ?code=XXX format)
+    import re
+    oauth_code = None
+    oauth_state = None
+    url_match = re.search(r'[?&]code=([A-Za-z0-9_\-]+).*[?&]state=([A-Za-z0-9_\-]+)', text)
+    hash_match = re.match(r'^([A-Za-z0-9_\-]{20,})#([A-Za-z0-9_\-]{20,})$', text.strip())
+    if url_match:
+        oauth_code, oauth_state = url_match.group(1), url_match.group(2)
+    elif hash_match:
+        oauth_code, oauth_state = hash_match.group(1), hash_match.group(2)
+
+    if oauth_code and oauth_state and oauth_state in claude_oauth._pending:
+        progress = await msg.reply_text("⏳ Completing login…")
+        ok, err_msg, token_data = await claude_oauth.exchange_code(oauth_state, oauth_code)
+        if ok and token_data:
+            storage.set_anth_key(token_data["user_db_id"], token_data["access_token"])
+            await progress.edit_text(
+                "✅ Claude subscription linked!\n"
+                "Send a receipt to test."
+            )
+        else:
+            await progress.edit_text(f"Login failed: {err_msg}")
+        return
+
     try:
         anth = anthropic_for(u)
     except RuntimeError:
@@ -1026,7 +1050,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
 
   <!-- OPTION 1: Claude subscription -->
   <div id="s1">
-    <a class="btn" href="{oauth}" id="authBtn">Sign in with Claude subscription →</a>
+    <a class="btn" href="{oauth}" id="authBtn" target="_blank">Sign in with Claude subscription →</a>
     <p class="small">Uses your existing Claude Pro/Max plan. No extra billing.</p>
 
     <div class="or">or</div>
