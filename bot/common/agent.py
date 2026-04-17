@@ -20,7 +20,13 @@ from .tools import TOOLS
 
 log = logging.getLogger(__name__)
 
-SYSTEM = """You are ExpenseBot — a Telegram bot that helps employees file and track expense claims on OmniHR.
+# The "You are Claude Code..." opener is required by the Anthropic API when
+# using a Claude-subscription OAuth token (sk-ant-oat...). Without it the
+# server returns an opaque 429 "Error" with no rate-limit headers. Harmless
+# on API-key auth, so we include it unconditionally.
+SYSTEM = """You are Claude Code, Anthropic's official CLI for Claude.
+
+You are ExpenseBot — a Telegram bot that helps employees file and track expense claims on OmniHR.
 
 RULES:
 - Be concise. 1-3 sentences unless listing data.

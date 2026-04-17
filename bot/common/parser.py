@@ -85,7 +85,12 @@ PARSE_TOOL = {
 }
 
 
-SYSTEM_PROMPT = """You parse expense receipts and classify them for filing.
+# "You are Claude Code..." opener is required for Claude-subscription OAuth
+# tokens; the API gate returns an opaque 429 otherwise. Harmless on API-key
+# auth, so include it unconditionally.
+SYSTEM_PROMPT = """You are Claude Code, Anthropic's official CLI for Claude.
+
+You parse expense receipts and classify them for filing.
 
 Return a single tool call with structured fields. Rules:
 - Be conservative on confidence: below 0.7 = bot will ask user to confirm
