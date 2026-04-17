@@ -175,12 +175,13 @@ def load_skill(hrms: str = "omnihr") -> str:
 
 
 WELCOME = (
-    "Hi! I file OmniHR claims for you.\n\n"
-    "Setup:\n"
-    "1. /setkey <your-anthropic-key>  (BYOK; ~$0.02 per receipt)\n"
-    "2. Install the extension: load `extension/` unpacked in chrome://extensions\n"
-    "3. /pair  → enter the code in the extension popup\n\n"
-    "Then send any receipt photo or PDF. I'll parse, classify, and file as a draft."
+    "🧾 *ExpenseBot*\n"
+    "File OmniHR expense claims right from Telegram.\n\n"
+    "*Quick setup (2 min):*\n\n"
+    "1️⃣ /login — connect your Claude AI (for receipt parsing)\n"
+    "2️⃣ /pair — connect your OmniHR account ([install extension first](https://expensebot.seahyingcong.com/extension))\n\n"
+    "Then just send me a receipt photo or PDF. I'll parse, classify, and file it.\n\n"
+    "Or ask me anything: _\"how much did I spend in April?\"_"
 )
 
 
@@ -188,7 +189,34 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _gate(update):
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
-    await update.message.reply_text(WELCOME)
+    u = storage.get_user(user_db_id)
+
+    # Personalize if already set up
+    has_ai = bool(storage.get_anth_key(user_db_id))
+    has_omnihr = bool(u and u.get("access_jwt"))
+
+    if has_ai and has_omnihr:
+        await update.message.reply_text(
+            "👋 Welcome back! You're all set up.\n"
+            "Send a receipt or ask me anything.",
+            parse_mode="Markdown",
+        )
+    elif has_ai:
+        await update.message.reply_text(
+            "👋 AI connected! One more step:\n\n"
+            "2️⃣ /pair — connect your OmniHR account "
+            "([install extension](https://expensebot.seahyingcong.com/extension) first)",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+    elif has_omnihr:
+        await update.message.reply_text(
+            "👋 OmniHR connected! One more step:\n\n"
+            "1️⃣ /login — connect your Claude AI for receipt parsing",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(WELCOME, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -703,7 +731,11 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         anth = anthropic_for(u)
     except RuntimeError:
-        await msg.reply_text("Connect first: /login")
+        await msg.reply_text(
+            "I'd love to help! First, connect your AI:\n\n"
+            "👉 /login — takes 30 seconds",
+            parse_mode="Markdown",
+        )
         return
 
     if not await _check_rate(update, u["id"], "parse"):

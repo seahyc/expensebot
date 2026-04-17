@@ -92,23 +92,46 @@ LANDING_PAGE = styled_page("Home", """
   <div class="sub">File OmniHR expense claims from Telegram</div>
 
   <p>Send a receipt photo or PDF → bot parses it with AI → files as a draft on OmniHR.
-  Track status, submit for approval, all from your phone.</p>
+  Track status, submit for approval, answer questions about your expenses — all from your phone.</p>
 
   <a class="btn" href="https://t.me/yc_sop_wedding_bot" target="_blank">Open in Telegram →</a>
 
-  <h2>Get started</h2>
+  <h2>Setup (one-time, ~2 min)</h2>
+
   <div class="step">
     <div class="num">1</div>
-    <div class="step-text"><strong>/login</strong> — connect your Claude subscription (or paste an API key)</div>
+    <div class="step-text"><strong>/login</strong> in Telegram — connect your Claude subscription (or paste an API key).
+    This powers the AI that reads your receipts. Uses your existing Claude Pro/Max plan.</div>
   </div>
   <div class="step">
     <div class="num">2</div>
-    <div class="step-text"><a href="/extension">Install the Chrome extension</a> → <strong>/pair</strong> with OmniHR</div>
+    <div class="step-text"><strong><a href="/extension">Install the Chrome extension</a></strong> —
+    download, unzip, load in Chrome (Developer mode → Load unpacked).</div>
   </div>
   <div class="step">
     <div class="num">3</div>
-    <div class="step-text">Send a receipt — bot does the rest</div>
+    <div class="step-text"><strong>/pair</strong> in Telegram — sign into omnihr.co in Chrome,
+    click the extension icon, paste the pairing code. This links your OmniHR account.</div>
   </div>
+
+  <div class="divider"></div>
+
+  <h2>Using the bot</h2>
+  <ul>
+    <li><strong>File a claim</strong> — send a receipt photo or PDF (with optional caption like "lunch with client")</li>
+    <li><strong>Ask questions</strong> — "how much did I spend in April?" · "what's still pending?"</li>
+    <li><strong>Take action</strong> — "submit claim 126758" · "delete the grab one"</li>
+    <li><strong>Quick list</strong> — /list · /list approved · /list apr</li>
+  </ul>
+
+  <div class="divider"></div>
+
+  <h2>How it works</h2>
+  <p>The bot reads your receipt using Claude AI, matches it to your company's expense policies,
+  and files it as a draft on OmniHR. You review on the dashboard, then submit for approval
+  from Telegram or the web.</p>
+  <p>Your data: receipts are deleted from our server within 24h (they're on OmniHR).
+  API keys and tokens are encrypted at rest. <a href="/privacy">Full privacy policy</a>.</p>
 
   <div class="divider"></div>
 
