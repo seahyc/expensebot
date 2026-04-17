@@ -1183,7 +1183,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
     <p style="color:#ccc;font-size:13px">Paste an Anthropic API key:</p>
     <input id="apikey" placeholder="sk-ant-api03-..." autocomplete="off">
     <button class="btn2" onclick="submitKey()">Use API Key</button>
-    <p class="small">Get one at <a href="https://console.anthropic.com/settings/keys" style="color:#6699cc">console.anthropic.com</a> (~$0.02/receipt)</p>
+    <p class="small">Get one at <a href="https://console.anthropic.com/settings/keys" style="color:#6699cc">console.anthropic.com</a>.</p>
   </div>
 
   <!-- STEP 2: paste token -->

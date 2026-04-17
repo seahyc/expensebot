@@ -107,25 +107,29 @@ async def exchange_code(state: str, code: str) -> tuple[bool, str, dict[str, Any
     if not pending:
         return False, "Session expired or invalid. Run /login again.", None
 
-    # Token exchange — one HTTP POST
+    # Token exchange — one HTTP POST. Claude's token endpoint wants a JSON
+    # body (not form-encoded); the form-encoded variant returns
+    # "Invalid request format".
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             resp = await client.post(
                 TOKEN_URL,
-                data={
+                json={
                     "grant_type": "authorization_code",
                     "client_id": CLIENT_ID,
                     "code": code,
+                    "state": state,
                     "redirect_uri": REDIRECT_URI,
                     "code_verifier": pending.code_verifier,
                 },
+                headers={"Content-Type": "application/json"},
             )
         except httpx.HTTPError as e:
             log.warning("Token exchange HTTP error: %s", e)
             return False, f"Network error during token exchange. Try /login again.", None
 
     if resp.status_code != 200:
-        log.warning("Token exchange failed: %s %s", resp.status_code, resp.text[:300])
+        log.warning("Token exchange failed: %s %s", resp.status_code, resp.text[:500])
         return False, f"Token exchange failed ({resp.status_code}). Try /login again.", None
 
     data = resp.json()
@@ -150,11 +154,12 @@ async def refresh_token(stored_refresh_token: str) -> tuple[bool, dict[str, Any]
         try:
             resp = await client.post(
                 TOKEN_URL,
-                data={
+                json={
                     "grant_type": "refresh_token",
                     "client_id": CLIENT_ID,
                     "refresh_token": stored_refresh_token,
                 },
+                headers={"Content-Type": "application/json"},
             )
         except httpx.HTTPError as e:
             log.warning("Token refresh error: %s", e)
