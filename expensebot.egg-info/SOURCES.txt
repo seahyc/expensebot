@@ -1,11 +1,6 @@
 README.md
 pyproject.toml
-bot/access.py
 bot/api.py
-bot/crypto.py
-bot/legal.py
-bot/logging_setup.py
-bot/rate_limit.py
 bot/server.py
 bot/storage.py
 bot/common/__init__.py
