@@ -305,36 +305,29 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"_{filter_label}: {total} claim{'s' if total != 1 else ''}_",
         parse_mode="Markdown",
     )
-    import httpx
-    async with httpx.AsyncClient(timeout=20) as web:
-        for r in rows:
-            caption = _claim_summary(r)
-            kb = _claim_buttons(r)
-            # Look up local receipt for preview
-            local = storage.find_receipt_by_submission(u["id"], r["id"])
-            if local and local.get("omnihr_file_path"):
-                try:
-                    resp = await web.get(local["omnihr_file_path"])
-                    if resp.status_code == 200:
-                        import io
-                        buf = io.BytesIO(resp.content)
-                        buf.name = local.get("omnihr_file_name") or f"receipt-{r['id']}.pdf"
-                        mime = local.get("omnihr_file_mime") or ""
-                        if mime.startswith("image/"):
-                            await update.message.reply_photo(
-                                photo=buf, caption=caption, parse_mode="Markdown", reply_markup=kb
-                            )
-                        else:
-                            await update.message.reply_document(
-                                document=buf, caption=caption, parse_mode="Markdown", reply_markup=kb
-                            )
-                        continue
-                except Exception as e:
-                    log.warning("receipt preview failed for %s: %s", r["id"], e)
-            # Fallback: text-only card
-            await update.message.reply_text(
-                caption, parse_mode="Markdown", reply_markup=kb
-            )
+    for r in rows:
+        caption = _claim_summary(r)
+        kb = _claim_buttons(r)
+        # Look up local receipt for Telegram file_id (instant, cached on TG servers)
+        local = storage.find_receipt_by_submission(u["id"], r["id"])
+        if local and local.get("tg_file_id"):
+            try:
+                fid = local["tg_file_id"]
+                if local.get("tg_file_type") == "photo":
+                    await update.message.reply_photo(
+                        photo=fid, caption=caption, parse_mode="Markdown", reply_markup=kb
+                    )
+                else:
+                    await update.message.reply_document(
+                        document=fid, caption=caption, parse_mode="Markdown", reply_markup=kb
+                    )
+                continue
+            except Exception as e:
+                log.warning("tg_file_id replay failed for %s: %s", r["id"], e)
+        # Fallback: text-only card
+        await update.message.reply_text(
+            caption, parse_mode="Markdown", reply_markup=kb
+        )
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -471,15 +464,19 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("Not paired with OmniHR yet — run /pair")
         return
 
-    # Download file
+    # Download file + capture Telegram's file_id for instant replay later
     if msg.document:
         tg_file = await msg.document.get_file()
         media_type = msg.document.mime_type or "application/pdf"
         filename = msg.document.file_name or "receipt.pdf"
+        tg_file_id = msg.document.file_id
+        tg_file_type = "document"
     elif msg.photo:
         tg_file = await msg.photo[-1].get_file()
         media_type = "image/jpeg"
         filename = "receipt.jpg"
+        tg_file_id = msg.photo[-1].file_id
+        tg_file_type = "photo"
     else:
         return
 
@@ -617,6 +614,8 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             omnihr_file_path=doc_path,
             omnihr_file_name=filename,
             omnihr_file_mime=media_type,
+            tg_file_id=tg_file_id,
+            tg_file_type=tg_file_type,
             status=draft.get("status", 3),
         )
         kb = _claim_buttons({"id": sub_id, "status": STATUS_DRAFT})

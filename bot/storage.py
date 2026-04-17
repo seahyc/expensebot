@@ -85,6 +85,8 @@ _ADD_COLS = [
     ("receipts", "omnihr_file_path", "TEXT"),
     ("receipts", "omnihr_file_name", "TEXT"),
     ("receipts", "omnihr_file_mime", "TEXT"),
+    ("receipts", "tg_file_id", "TEXT"),
+    ("receipts", "tg_file_type", "TEXT"),  # "photo" or "document"
 ]
 
 
@@ -285,6 +287,8 @@ def insert_receipt(
     omnihr_file_path: str | None = None,
     omnihr_file_name: str | None = None,
     omnihr_file_mime: str | None = None,
+    tg_file_id: str | None = None,
+    tg_file_type: str | None = None,
     status: int | None = None,
 ) -> int:
     with db() as conn:
@@ -292,8 +296,9 @@ def insert_receipt(
             """INSERT INTO receipts (user_id, file_sha256, parsed_json,
                parsed_merchant, parsed_date, parsed_amount, parsed_currency,
                omnihr_doc_id, omnihr_submission_id,
-               omnihr_file_path, omnihr_file_name, omnihr_file_mime, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               omnihr_file_path, omnihr_file_name, omnihr_file_mime,
+               tg_file_id, tg_file_type, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 user_id,
                 file_sha256,
@@ -307,6 +312,8 @@ def insert_receipt(
                 omnihr_file_path,
                 omnihr_file_name,
                 omnihr_file_mime,
+                tg_file_id,
+                tg_file_type,
                 status,
             ),
         )
