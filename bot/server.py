@@ -58,7 +58,7 @@ from omnihr_client.client import (
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
 from omnihr_client.schema import invalidate_schema
 
-from . import access, legal, logging_setup, rate_limit, storage
+from . import access, claude_oauth, legal, logging_setup, rate_limit, storage
 from .common.agent_parser import parse_receipt_via_agent
 from .common.parser import parse_receipt
 
@@ -190,87 +190,25 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME)
 
 
-# Pending login processes: {telegram_user_id: subprocess}
-_pending_logins: dict[int, asyncio.subprocess.Process] = {}
-
-
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Proxy `claude auth login` — send OAuth URL, then wait for user to paste the code."""
+    """Start OAuth PKCE flow — user taps link, authorizes, auto-redirected back."""
     if not await _gate(update):
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
-    tid = update.effective_user.id
 
-    # Kill any prior pending login for this user
-    if tid in _pending_logins:
-        try:
-            _pending_logins[tid].kill()
-        except Exception:
-            pass
-        del _pending_logins[tid]
-
-    progress = await update.message.reply_text("Starting Claude login…")
-
-    proc = await asyncio.subprocess.create_subprocess_exec(
-        "claude", "auth", "login", "--claudeai",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        stdin=asyncio.subprocess.PIPE,
+    auth_url, state = claude_oauth.start_login(
+        telegram_user_id=update.effective_user.id,
+        user_db_id=user_db_id,
+        public_base_url=PUBLIC_BASE_URL,
     )
 
-    # Read stdout to find the URL
-    url_found = None
-    output_lines = []
-    try:
-        while True:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
-            if not line:
-                break
-            text = line.decode().strip()
-            output_lines.append(text)
-            log.info("claude login: %s", text[:120])
-            if "https://" in text:
-                import re
-                urls = re.findall(r'https://[^\s]+', text)
-                if urls:
-                    url_found = urls[0]
-                    break
-    except asyncio.TimeoutError:
-        pass
-
-    if not url_found:
-        await progress.edit_text(
-            f"Couldn't get login URL. Output:\n{chr(10).join(output_lines[-5:])}"
-        )
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return
-
-    _pending_logins[tid] = proc
-
-    await progress.edit_text(
-        f"1️⃣ [Tap here to sign in]({url_found})\n\n"
-        f"2️⃣ After signing in, you'll see a code on the page.\n"
-        f"3️⃣ *Paste that code here* and I'll complete the login.\n\n"
-        f"_(expires in 5 minutes)_",
+    await update.message.reply_text(
+        f"[👆 Tap here to sign in with Claude]({auth_url})\n\n"
+        f"After authorizing, you'll be redirected back automatically.\n"
+        f"_(link expires in 10 minutes)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
-
-    # The code will be handled by on_text when the user pastes it
-    # Set a timeout to clean up if they don't paste in time
-    async def _cleanup():
-        await asyncio.sleep(300)
-        if tid in _pending_logins:
-            try:
-                _pending_logins[tid].kill()
-            except Exception:
-                pass
-            del _pending_logins[tid]
-
-    asyncio.create_task(_cleanup())
 
 
 async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -644,22 +582,8 @@ async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("✅ Account purged.")
 
 
-def _extract_oauth_code(text: str) -> str | None:
-    """Extract OAuth code from a callback URL or raw pasted text."""
-    import re
-    # Try to extract from full callback URL: ?code=XXX&state=YYY
-    match = re.search(r'[?&]code=([A-Za-z0-9_\-]+)', text)
-    if match:
-        return match.group(1)
-    # Try raw code (alphanumeric + _ + -, at least 20 chars)
-    stripped = text.strip()
-    if len(stripped) > 20 and re.match(r'^[A-Za-z0-9_\-]+$', stripped):
-        return stripped
-    return None
-
-
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch-all for free-form text. Handles pending login codes + general questions."""
+    """Catch-all for free-form text — routes through Claude for questions."""
     if not await _gate(update):
         return
     msg = update.message
@@ -671,47 +595,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (msg.text or "").strip()
     if not text:
         return
-
-    tid = msg.from_user.id
-
-    # Check for pending login — user is pasting the OAuth code
-    if tid in _pending_logins:
-        code = _extract_oauth_code(text)
-        if code:
-            proc = _pending_logins.pop(tid)
-            progress = await msg.reply_text("⏳ Completing login…")
-            try:
-                # Feed the code to claude auth login's stdin
-                proc.stdin.write((code + "\n").encode())
-                await proc.stdin.drain()
-                proc.stdin.close()
-                returncode = await asyncio.wait_for(proc.wait(), timeout=30)
-                if returncode == 0:
-                    user_db_id = storage.upsert_user("telegram", str(tid))
-                    storage.set_anth_key(user_db_id, "__claude_subscription__")
-                    await progress.edit_text(
-                        "✅ Claude subscription linked!\n"
-                        "Your receipts will be parsed using your Claude plan — no API key needed.\n"
-                        "Send a receipt to test."
-                    )
-                else:
-                    await progress.edit_text(
-                        f"Login failed (exit {returncode}). Try `/login` again.",
-                        parse_mode="Markdown",
-                    )
-            except asyncio.TimeoutError:
-                await progress.edit_text("Login timed out. Try `/login` again.")
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            except Exception as e:
-                await progress.edit_text(f"Login error: {e}")
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            return
 
     # Need Anthropic key for the conversational layer
     try:
@@ -1064,6 +947,57 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
             "- [GitHub](https://github.com/seahyc/expensebot)\n"
             "- [Terms](/terms)  ·  [Privacy](/privacy)\n",
         )
+
+    @app.get("/auth/callback")
+    async def auth_callback(code: str = "", state: str = "") -> HTMLResponse:
+        """OAuth callback — Claude redirects here after user authorizes."""
+        if not code or not state:
+            return HTMLResponse("<h1>Missing code or state</h1><p>Try /login again.</p>", status_code=400)
+
+        ok, msg, token_data = await claude_oauth.complete_login(state, code)
+
+        if ok and token_data:
+            # Store the subscription token
+            user_db_id = token_data["user_db_id"]
+            access = token_data["access_token"]
+            storage.set_anth_key(user_db_id, access)
+
+            # DM the user via Telegram
+            if tg_app:
+                tid = token_data["telegram_user_id"]
+                try:
+                    await tg_app.bot.send_message(
+                        chat_id=tid,
+                        text=(
+                            "✅ Claude subscription linked!\n"
+                            "Your receipts will be parsed using your Claude plan — no API key needed.\n"
+                            "Send a receipt to test."
+                        ),
+                    )
+                except Exception as e:
+                    log.warning("couldn't DM after login: %s", e)
+
+            return HTMLResponse(
+                "<html><body style='background:#1a1a2e;color:#eee;display:flex;"
+                "align-items:center;justify-content:center;height:100vh;"
+                "font-family:sans-serif'>"
+                "<div style='text-align:center'>"
+                "<h1>✅ Logged in!</h1>"
+                "<p>Go back to Telegram — your bot is ready.</p>"
+                "</div></body></html>"
+            )
+        else:
+            return HTMLResponse(
+                f"<html><body style='background:#1a1a2e;color:#eee;display:flex;"
+                f"align-items:center;justify-content:center;height:100vh;"
+                f"font-family:sans-serif'>"
+                f"<div style='text-align:center'>"
+                f"<h1>❌ Login failed</h1>"
+                f"<p>{msg}</p>"
+                f"<p>Go back to Telegram and try /login again.</p>"
+                f"</div></body></html>",
+                status_code=400,
+            )
 
     @app.get("/terms", response_class=HTMLResponse)
     async def terms() -> str:
