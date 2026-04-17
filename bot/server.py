@@ -598,9 +598,16 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.edit_text(f"Schema drift on policy {parsed.suggested_policy_id}: {e.field_errors}")
             return
         except ValidationError as e:
+            # Show what we parsed + what's missing
+            parsed_summary = (
+                f"Parsed: {parsed.merchant} {parsed.currency} {parsed.amount} "
+                f"on {parsed.receipt_date}, policy {parsed.suggested_policy_id}\n"
+                f"Custom fields from Claude: {parsed.custom_fields}\n"
+                f"Sub-cat: {parsed.suggested_sub_category_label}\n"
+            )
             await progress.edit_text(
-                f"Couldn't file — missing required fields:\n{e.field_errors}\n"
-                f"Reply with the values and I'll retry."
+                f"Couldn't file — {e}\n\n{parsed_summary}\n"
+                f"Values attempted: {list(values.keys())}"
             )
             return
         except Exception as e:
