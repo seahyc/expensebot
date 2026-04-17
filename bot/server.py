@@ -58,7 +58,7 @@ from omnihr_client.client import (
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
 from omnihr_client.schema import invalidate_schema
 
-from . import access, claude_oauth, legal, logging_setup, pages, rate_limit, storage
+from . import access, claude_oauth, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
 from .common.parser import parse_receipt
@@ -104,10 +104,22 @@ def client_for(user: dict) -> OmniHRClient:
         access_expires_at=datetime.fromisoformat(user["access_expires_at"]),
         refresh_expires_at=datetime.fromisoformat(user["refresh_expires_at"]),
     )
+    user_id = user["id"]
+
+    async def _persist(new: Tokens) -> None:
+        storage.set_omnihr_tokens(
+            user_id,
+            access_jwt=new.access_token,
+            refresh_jwt=new.refresh_token,
+            access_expires_at=new.access_expires_at,
+            refresh_expires_at=new.refresh_expires_at,
+        )
+
     return OmniHRClient(
         tokens=tokens,
         employee_id=user["omnihr_employee_id"],
         tenant_id=user["tenant_id"] or "unknown",
+        on_tokens_refreshed=_persist,
     )
 
 
@@ -1027,7 +1039,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, Response
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -1035,7 +1047,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
-        return pages.LANDING_PAGE
+        return pages.landing_page()
 
     @app.get("/auth/start")
     async def auth_start(s: str = "", oauth: str = "") -> HTMLResponse:
@@ -1207,9 +1219,36 @@ async function submitKey(){{
                 pass
         return {"ok": True}
 
+    @app.get("/favicon.ico")
+    @app.get("/favicon.svg")
+    async def favicon() -> Response:
+        # Vector receipt on the site's purple card. Avoids emoji <text> because
+        # favicon rasterizers in Chrome/Safari don't reliably fall back to
+        # system color-emoji fonts at 16×16.
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+            '<rect width="64" height="64" rx="12" fill="#6633ee"/>'
+            # Receipt paper with zigzag torn bottom
+            '<path d="M14 12 H50 V46 '
+            'L46 50 L42 46 L38 50 L34 46 L30 50 L26 46 L22 50 L18 46 L14 50 Z" '
+            'fill="#fff"/>'
+            # Lines of "text" on the receipt
+            '<rect x="19" y="20" width="26" height="3" rx="1" fill="#6633ee"/>'
+            '<rect x="19" y="28" width="20" height="2.5" rx="1" fill="#bbb"/>'
+            '<rect x="19" y="34" width="26" height="2.5" rx="1" fill="#bbb"/>'
+            # Amount dash
+            '<rect x="35" y="40" width="10" height="3" rx="1" fill="#6633ee"/>'
+            "</svg>"
+        )
+        return Response(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
     @app.get("/extension")
     async def extension_page() -> HTMLResponse:
-        return HTMLResponse(pages.EXTENSION_PAGE)
+        return HTMLResponse(pages.extension_page())
 
     from fastapi.responses import FileResponse
 
@@ -1227,11 +1266,11 @@ async function submitKey(){{
 
     @app.get("/terms", response_class=HTMLResponse)
     async def terms() -> str:
-        return legal.html_page("expensebot — Terms", legal.TERMS_MD)
+        return pages.terms_page()
 
     @app.get("/privacy", response_class=HTMLResponse)
     async def privacy() -> str:
-        return legal.html_page("expensebot — Privacy", legal.PRIVACY_MD)
+        return pages.privacy_page()
 
     @app.post("/extension/pair")
     async def extension_pair(p: PairPayload) -> dict:
@@ -1337,11 +1376,35 @@ async def run() -> None:
     config = uvicorn.Config(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
     server = uvicorn.Server(config)
 
-    # Run uvicorn + telegram polling in parallel
+    # Run uvicorn + telegram polling + refresh sweeper in parallel
     await tg_app.initialize()
+    try:
+        me = await tg_app.bot.get_me()
+        pages.BOT_USERNAME = me.username
+        log.info("telegram bot identified as @%s", me.username)
+    except Exception:
+        log.exception("could not resolve telegram bot username; pages will show fallback copy")
     await tg_app.start()
     polling_task = asyncio.create_task(
         tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    )
+    from ops.refresh_sweeper import run_forever as refresh_sweeper_forever
+
+    async def notify_session_expired(user: dict, message: str) -> None:
+        channel = user.get("channel")
+        chan_uid = user.get("channel_user_id")
+        if channel == "telegram" and chan_uid:
+            await tg_app.bot.send_message(
+                chat_id=int(chan_uid),
+                text=message,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+        else:
+            log.info("session-expired notify skipped: channel=%s (no adapter)", channel)
+
+    sweeper_task = asyncio.create_task(
+        refresh_sweeper_forever(notifier=notify_session_expired)
     )
 
     try:
@@ -1351,6 +1414,7 @@ async def run() -> None:
         await tg_app.stop()
         await tg_app.shutdown()
         polling_task.cancel()
+        sweeper_task.cancel()
 
 
 def main() -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -87,6 +87,7 @@ _ADD_COLS = [
     ("receipts", "omnihr_file_mime", "TEXT"),
     ("receipts", "tg_file_id", "TEXT"),
     ("receipts", "tg_file_type", "TEXT"),  # "photo" or "document"
+    ("users", "session_expired_notified_at", "TEXT"),
 ]
 
 
@@ -166,6 +167,93 @@ def get_omnihr_tokens(user_id: int) -> tuple[str | None, str | None]:
         return crypto.decrypt(row["access_jwt"]), crypto.decrypt(row["refresh_jwt"])
 
 
+def set_omnihr_tokens(
+    user_id: int,
+    *,
+    access_jwt: str,
+    refresh_jwt: str,
+    access_expires_at: datetime,
+    refresh_expires_at: datetime,
+) -> None:
+    """Persist refreshed JWTs. Narrower than set_omnihr_session — used by the
+    in-request refresh path and the 6h sweeper, which don't touch identity."""
+    with db() as conn:
+        conn.execute(
+            """UPDATE users SET
+               access_jwt=?, refresh_jwt=?,
+               access_expires_at=?, refresh_expires_at=?
+               WHERE id=?""",
+            (
+                crypto.encrypt(access_jwt),
+                crypto.encrypt(refresh_jwt),
+                access_expires_at.isoformat(),
+                refresh_expires_at.isoformat(),
+                user_id,
+            ),
+        )
+
+
+def users_with_expired_session(*, renotify_after: timedelta) -> list[dict]:
+    """Users whose refresh token has already expired and who haven't been told
+    in the last `renotify_after`. Used by the sweeper to DM a one-shot
+    'session expired, run /pair' prompt.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff_notified = (now - renotify_after).isoformat()
+    now_iso = now.isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, channel, channel_user_id, session_expired_notified_at
+               FROM users
+               WHERE refresh_jwt IS NOT NULL
+                 AND refresh_expires_at <= ?
+                 AND (session_expired_notified_at IS NULL
+                      OR session_expired_notified_at < ?)""",
+            (now_iso, cutoff_notified),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_refresh_dead(user_id: int) -> None:
+    """Mark the refresh JWT as no longer usable — called when OmniHR rejected
+    a refresh attempt. Sets refresh_expires_at to now so the next expired-user
+    query picks the user up for notification.
+    """
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET refresh_expires_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), user_id),
+        )
+
+
+def mark_session_expired_notified(user_id: int) -> None:
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET session_expired_notified_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), user_id),
+        )
+
+
+def users_needing_refresh(*, within: timedelta) -> list[dict]:
+    """Users whose access JWT expires within `within` AND whose refresh JWT is
+    still live. Returned rows are decryption-free dicts — tokens are fetched
+    separately via get_omnihr_tokens to keep the decrypt surface small.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    cutoff = (datetime.now(timezone.utc) + within).isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, access_expires_at, refresh_expires_at
+               FROM users
+               WHERE access_jwt IS NOT NULL
+                 AND refresh_jwt IS NOT NULL
+                 AND access_expires_at < ?
+                 AND refresh_expires_at > ?""",
+            (cutoff, now),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def set_omnihr_session(
     user_id: int,
     *,
@@ -183,7 +271,8 @@ def set_omnihr_session(
             """UPDATE users SET
                access_jwt=?, refresh_jwt=?,
                access_expires_at=?, refresh_expires_at=?,
-               omnihr_employee_id=?, omnihr_full_name=?, omnihr_email=?, tenant_id=?
+               omnihr_employee_id=?, omnihr_full_name=?, omnihr_email=?, tenant_id=?,
+               session_expired_notified_at=NULL
                WHERE id=?""",
             (
                 crypto.encrypt(access_jwt),

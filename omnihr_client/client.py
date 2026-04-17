@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -75,10 +75,12 @@ class OmniHRClient:
         tokens: Tokens,
         employee_id: int,
         tenant_id: str,
+        on_tokens_refreshed: Callable[[Tokens], Awaitable[None]] | None = None,
     ):
         self.tokens = tokens
         self.employee_id = employee_id
         self.tenant_id = tenant_id
+        self._on_tokens_refreshed = on_tokens_refreshed
         self._http = httpx.AsyncClient(base_url=base_url, timeout=30)
 
     async def __aenter__(self) -> "OmniHRClient":
@@ -92,6 +94,11 @@ class OmniHRClient:
             if self.tokens.refresh_expired:
                 raise AuthError("Refresh token expired — user must re-pair")
             self.tokens = await refresh_access_token(self._http, self.tokens.refresh_token)
+            if self._on_tokens_refreshed is not None:
+                try:
+                    await self._on_tokens_refreshed(self.tokens)
+                except Exception:
+                    log.exception("persist-refreshed-tokens hook failed")
 
     def _cookies(self) -> dict[str, str]:
         return {
