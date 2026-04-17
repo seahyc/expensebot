@@ -126,12 +126,12 @@ def extension_page() -> str:
   <p style="color:#ccc">Back on <a href="{link}" target="_blank"><strong>{handle}</strong></a>
   in Telegram:</p>
   <ol style="padding-left:22px;color:#bbb">
-    <li style="margin:8px 0">Make sure you're signed in to
-      <a href="https://app.omnihr.co" target="_blank" style="color:#8b6cff">omnihr.co</a>
-      in Chrome. (If that link shows your dashboard, you're good. If it shows
-      a login page, sign in first — Google SSO is fine.)</li>
+    <li style="margin:8px 0">Make sure you're signed in to your company's OmniHR in Chrome.
+      It's at <code>&lt;your-company&gt;.omnihr.co</code> (e.g.
+      <code>glints.omnihr.co</code>) — if your dashboard loads without a login
+      prompt, you're good. Google SSO is fine.</li>
     <li style="margin:8px 0">Send <code>/pair</code> to the bot. You'll get a 6-digit code.</li>
-    <li style="margin:8px 0">On your omnihr.co tab, click the 💰 icon in the
+    <li style="margin:8px 0">On that OmniHR tab, click the 💰 icon in Chrome's
       toolbar, paste the 6 digits, tap <strong>Pair</strong>.</li>
   </ol>
 
@@ -266,13 +266,16 @@ def landing_page() -> str:
   <div class="step">
     <div class="num">2</div>
     <div class="step-text"><strong><a href="/extension">Install the Chrome extension</a></strong> —
-    download, unzip, load in Chrome (Developer mode → Load unpacked).</div>
+    that page has step-by-step instructions (takes ~30 seconds).</div>
   </div>
   <div class="step">
     <div class="num">3</div>
-    <div class="step-text">Back in <a href="{link}" target="_blank"><strong>{handle}</strong></a>,
-    send <strong>/pair</strong> — sign into omnihr.co in Chrome, click the extension icon,
-    paste the pairing code. This links your OmniHR account.</div>
+    <div class="step-text">Sign in to your company's OmniHR in Chrome —
+    it's at <code>&lt;your-company&gt;.omnihr.co</code> (e.g.
+    <code>glints.omnihr.co</code>). Then in
+    <a href="{link}" target="_blank"><strong>{handle}</strong></a>
+    send <strong>/pair</strong> → you'll get a 6-digit code → click the 💰
+    icon on your OmniHR tab → paste → tap <em>Pair</em>.</div>
   </div>
 
   <div class="divider"></div>

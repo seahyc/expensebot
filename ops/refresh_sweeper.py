@@ -37,11 +37,12 @@ EXPIRY_RENOTIFY_AFTER = timedelta(days=7)
 EXPIRY_MESSAGE = (
     "🔒 Your OmniHR session expired — I can't file claims until you reconnect.\n\n"
     "*To reconnect (~30s):*\n"
-    "1. Open Chrome and sign in to [omnihr.co](https://app.omnihr.co) as usual "
-    "(Google SSO is fine) — your browser session probably expired too.\n"
+    "1. Sign in to your company's OmniHR in Chrome (it's at "
+    "`<your-company>.omnihr.co`, e.g. `glints.omnihr.co`). Google SSO is fine. "
+    "Your browser session probably expired too.\n"
     "2. Send /pair here. I'll reply with a 6-digit code.\n"
-    "3. On the omnihr.co tab, click the *ExpenseBot* extension icon "
-    "(puzzle-piece menu if unpinned) → paste the code → *Pair*.\n\n"
+    "3. On that OmniHR tab, click the 💰 *ExpenseBot* icon in Chrome's toolbar "
+    "(puzzle-piece menu if unpinned) → paste the code → tap *Pair*.\n\n"
     "Don't have the extension anymore? "
     "Reinstall: https://expensebot.seahyingcong.com/extension"
 )

@@ -267,10 +267,11 @@ STEP2_PROMPT = (
 
 STEP3_PROMPT = (
     "*Step 3 of 3 — pair your OmniHR account*\n"
-    "1. Sign in to [omnihr.co](https://app.omnihr.co) in Chrome if you aren't already. "
-    "(If that link shows your dashboard, you're signed in.)\n"
+    "1. Sign in to your company's OmniHR in Chrome — it's at "
+    "`<your-company>.omnihr.co` (e.g. `glints.omnihr.co`). If your dashboard "
+    "loads without a login prompt, you're already signed in.\n"
     "2. Send /pair here — I'll reply with a 6-digit code.\n"
-    "3. On your omnihr.co tab, click the 💰 *ExpenseBot* icon in Chrome's toolbar "
+    "3. On that OmniHR tab, click the 💰 *ExpenseBot* icon in Chrome's toolbar "
     "(or the puzzle-piece menu if unpinned) → paste the code → tap *Pair*.\n\n"
     "That's it — I'll confirm once we're connected."
 )
@@ -311,10 +312,13 @@ def _web_next_step_html(user_db_id: int, u: dict | None) -> dict:
                 '<p style="color:#ccc"><strong>Two more steps to go:</strong></p>'
                 '<p><strong>2.</strong> '
                 '<a href="/extension" style="color:#8b6cff;font-weight:600">Install the Chrome extension</a> '
-                '(download, unzip, load in Chrome → Developer mode → Load unpacked).</p>'
-                f'<p><strong>3.</strong> Back in '
-                f'<a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">Telegram</a>, '
-                'send <code>/pair</code>. You\'ll get a 6-digit code — paste it into the extension while signed in to omnihr.co.</p>'
+                '— the page walks you through it (~30 seconds).</p>'
+                '<p><strong>3.</strong> Sign in to your company\'s OmniHR '
+                '(<code>&lt;your-company&gt;.omnihr.co</code>, e.g. '
+                '<code>glints.omnihr.co</code>) in Chrome, then send '
+                f'<a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">'
+                f'<code>/pair</code> in Telegram</a>. '
+                'Paste the 6-digit code into the 💰 extension icon to finish.</p>'
             ),
         }
     # AI not yet connected — unusual on this page, but handle gracefully
@@ -429,11 +433,13 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"```\n{code}\n```\n"
         f"👆 Tap the code to copy.\n\n"
-        f"*Before you paste:* make sure you're signed into "
-        f"[omnihr.co](https://app.omnihr.co) in Chrome — if clicking that link "
-        f"takes you straight to your dashboard (not a login page), you're good.\n\n"
+        f"*Don't have the extension yet?* "
+        f"[Install it here](https://expensebot.seahyingcong.com/extension) first (~30s).\n\n"
+        f"*Before you paste:* make sure you're signed in to your company's OmniHR "
+        f"in Chrome — it's at `<your-company>.omnihr.co` (e.g. `glints.omnihr.co`). "
+        f"If your dashboard loads without a login prompt, you're good.\n\n"
         f"*Then:*\n"
-        f"1. On the omnihr.co tab, click the 💰 ExpenseBot icon in Chrome's toolbar "
+        f"1. On that OmniHR tab, click the 💰 ExpenseBot icon in Chrome's toolbar "
         f"(or the puzzle-piece menu if it isn't pinned yet).\n"
         f"2. Paste the 6-digit code.\n"
         f"3. Tap *Pair*.\n\n"
