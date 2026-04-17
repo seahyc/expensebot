@@ -812,7 +812,9 @@ async def run() -> None:
     # Run uvicorn + telegram polling in parallel
     await tg_app.initialize()
     await tg_app.start()
-    polling_task = asyncio.create_task(tg_app.updater.start_polling())
+    polling_task = asyncio.create_task(
+        tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    )
 
     try:
         await server.serve()
