@@ -190,11 +190,24 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME)
 
 
+# Pending login processes: {telegram_user_id: subprocess}
+_pending_logins: dict[int, asyncio.subprocess.Process] = {}
+
+
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Proxy `claude auth login` — run on the server, send the OAuth URL to user."""
+    """Proxy `claude auth login` — send OAuth URL, then wait for user to paste the code."""
     if not await _gate(update):
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    tid = update.effective_user.id
+
+    # Kill any prior pending login for this user
+    if tid in _pending_logins:
+        try:
+            _pending_logins[tid].kill()
+        except Exception:
+            pass
+        del _pending_logins[tid]
 
     progress = await update.message.reply_text("Starting Claude login…")
 
@@ -205,17 +218,18 @@ async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         stdin=asyncio.subprocess.PIPE,
     )
 
-    # Read stdout line-by-line to find the URL
+    # Read stdout to find the URL
     url_found = None
+    output_lines = []
     try:
         while True:
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
             if not line:
                 break
             text = line.decode().strip()
-            log.info("claude login stdout: %s", text[:80])
-            if "https://claude.com/" in text or "https://platform.claude.com/" in text:
-                # Extract URL from the line
+            output_lines.append(text)
+            log.info("claude login: %s", text[:120])
+            if "https://" in text:
                 import re
                 urls = re.findall(r'https://[^\s]+', text)
                 if urls:
@@ -225,42 +239,38 @@ async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
     if not url_found:
-        await progress.edit_text("Couldn't get login URL. Try again or run `claude auth login` on the server manually.")
+        await progress.edit_text(
+            f"Couldn't get login URL. Output:\n{chr(10).join(output_lines[-5:])}"
+        )
         try:
             proc.kill()
         except Exception:
             pass
         return
 
+    _pending_logins[tid] = proc
+
     await progress.edit_text(
-        f"👆 [Tap here to sign in with your Claude subscription]({url_found})\n\n"
-        f"After signing in, come back here — I'll detect it automatically.\n"
+        f"1️⃣ [Tap here to sign in]({url_found})\n\n"
+        f"2️⃣ After signing in, you'll see a code on the page.\n"
+        f"3️⃣ *Paste that code here* and I'll complete the login.\n\n"
         f"_(expires in 5 minutes)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
 
-    # Wait for the login to complete (subprocess exits on success)
-    try:
-        returncode = await asyncio.wait_for(proc.wait(), timeout=300)
-        if returncode == 0:
-            await update.message.reply_text(
-                "✅ Claude subscription linked! Your receipts will be parsed using your Claude plan.\n"
-                "No API key needed. Send a receipt to test."
-            )
-            # Mark user as using subscription auth
-            storage.set_anth_key(user_db_id, "__claude_subscription__")
-        else:
-            await update.message.reply_text(
-                f"Login failed (exit {returncode}). Try `/login` again.",
-                parse_mode="Markdown",
-            )
-    except asyncio.TimeoutError:
-        await update.message.reply_text("Login timed out (5 min). Try `/login` again.")
-        try:
-            proc.kill()
-        except Exception:
-            pass
+    # The code will be handled by on_text when the user pastes it
+    # Set a timeout to clean up if they don't paste in time
+    async def _cleanup():
+        await asyncio.sleep(300)
+        if tid in _pending_logins:
+            try:
+                _pending_logins[tid].kill()
+            except Exception:
+                pass
+            del _pending_logins[tid]
+
+    asyncio.create_task(_cleanup())
 
 
 async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -634,8 +644,22 @@ async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("✅ Account purged.")
 
 
+def _extract_oauth_code(text: str) -> str | None:
+    """Extract OAuth code from a callback URL or raw pasted text."""
+    import re
+    # Try to extract from full callback URL: ?code=XXX&state=YYY
+    match = re.search(r'[?&]code=([A-Za-z0-9_\-]+)', text)
+    if match:
+        return match.group(1)
+    # Try raw code (alphanumeric + _ + -, at least 20 chars)
+    stripped = text.strip()
+    if len(stripped) > 20 and re.match(r'^[A-Za-z0-9_\-]+$', stripped):
+        return stripped
+    return None
+
+
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch-all for free-form text: route through Claude with skills + claims context."""
+    """Catch-all for free-form text. Handles pending login codes + general questions."""
     if not await _gate(update):
         return
     msg = update.message
@@ -647,6 +671,47 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (msg.text or "").strip()
     if not text:
         return
+
+    tid = msg.from_user.id
+
+    # Check for pending login — user is pasting the OAuth code
+    if tid in _pending_logins:
+        code = _extract_oauth_code(text)
+        if code:
+            proc = _pending_logins.pop(tid)
+            progress = await msg.reply_text("⏳ Completing login…")
+            try:
+                # Feed the code to claude auth login's stdin
+                proc.stdin.write((code + "\n").encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+                returncode = await asyncio.wait_for(proc.wait(), timeout=30)
+                if returncode == 0:
+                    user_db_id = storage.upsert_user("telegram", str(tid))
+                    storage.set_anth_key(user_db_id, "__claude_subscription__")
+                    await progress.edit_text(
+                        "✅ Claude subscription linked!\n"
+                        "Your receipts will be parsed using your Claude plan — no API key needed.\n"
+                        "Send a receipt to test."
+                    )
+                else:
+                    await progress.edit_text(
+                        f"Login failed (exit {returncode}). Try `/login` again.",
+                        parse_mode="Markdown",
+                    )
+            except asyncio.TimeoutError:
+                await progress.edit_text("Login timed out. Try `/login` again.")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            except Exception as e:
+                await progress.edit_text(f"Login error: {e}")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return
 
     # Need Anthropic key for the conversational layer
     try:
