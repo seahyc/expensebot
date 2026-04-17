@@ -120,6 +120,14 @@ async def run_agent(
             )
         except Exception as e:
             log.warning("agent call failed: %s", e)
+            msg = str(e)
+            if "429" in msg or "rate_limit" in msg.lower():
+                return (
+                    "⏱ Claude rate-limited this request. If you're using /login "
+                    "(Claude subscription), your plan's per-hour quota is shared "
+                    "with Claude Code. Wait a minute or paste an API key with "
+                    "/setkey sk-ant-… to avoid the subscription limits."
+                )
             return f"Sorry, I hit an error: {e}"
 
         # Collect text + tool_use blocks

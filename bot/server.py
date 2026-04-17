@@ -162,10 +162,15 @@ def anthropic_for(user: dict) -> AsyncAnthropic:
     maintainer_key = os.environ.get("MAINTAINER_ANTHROPIC_API_KEY", "").strip()
 
     if _is_oauth_token(user_cred):
+        # Claude Code sends a stack of betas in addition to oauth-2025-04-20.
+        # Without claude-code-20250219, some models return opaque 429s.
         return AsyncAnthropic(
             auth_token=user_cred,
-            max_retries=0,
-            default_headers={"anthropic-beta": "oauth-2025-04-20"},
+            max_retries=2,
+            default_headers={
+                "anthropic-beta": "oauth-2025-04-20,claude-code-20250219",
+                "user-agent": "ExpenseBot/1.0 (via Claude Code OAuth)",
+            },
         )
 
     key = user_cred if _plausible_anth_key(user_cred) else (
@@ -173,7 +178,7 @@ def anthropic_for(user: dict) -> AsyncAnthropic:
     )
     if not key:
         raise RuntimeError("No Anthropic key — run /setkey sk-ant-…")
-    return AsyncAnthropic(api_key=key, max_retries=0)
+    return AsyncAnthropic(api_key=key, max_retries=2)
 
 
 async def _check_rate(update: Update, user_db_id: int, kind: str) -> bool:
