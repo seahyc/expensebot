@@ -338,6 +338,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q or not q.data:
         return
+    log.info("callback: user=%s data=%s", q.from_user.id if q.from_user else "?", q.data)
     if not await _gate(update):
         return
     u = storage.get_user_by_channel("telegram", str(q.from_user.id))
@@ -795,6 +796,11 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("delete_account", cmd_delete_account))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
+
+    async def on_error(update, context):
+        log.exception("unhandled error in handler", exc_info=context.error)
+
+    tg_app.add_error_handler(on_error)
 
     app = make_app(tg_app)
 
