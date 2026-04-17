@@ -162,7 +162,14 @@ async def _gate(update: Update) -> bool:
 # Telegram handlers
 # ---------------------------------------------------------------------------
 
-SKILLS_MD = (REPO_ROOT / "bot" / "skills.md").read_text()
+SYSTEM_PROMPT_MD = (REPO_ROOT / "bot" / "system_prompt.md").read_text()
+SKILLS_DIR = REPO_ROOT / "bot" / "skills"
+
+
+def load_skill(hrms: str = "omnihr") -> str:
+    """Load the HRMS-specific skill file. Falls back to empty if not found."""
+    path = SKILLS_DIR / f"{hrms}.md"
+    return path.read_text() if path.exists() else ""
 
 
 WELCOME = (
@@ -604,12 +611,13 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     tenant_md = load_tenant_md(u.get("tenant_id"))
     user_md = load_user_md(u)
 
-    # Single Claude call — skills.md + tenant + claims as cached context
+    # Single Claude call — system prompt + HRMS skill + tenant + claims as context
+    hrms_skill = load_skill("omnihr")  # TODO: read from tenant config
     try:
         resp = await anth.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=500,
-            system=SKILLS_MD,
+            system=SYSTEM_PROMPT_MD,
             messages=[
                 {
                     "role": "user",
@@ -617,6 +625,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         {
                             "type": "text",
                             "text": (
+                                f"## HRMS integration\n{hrms_skill[:3000]}\n\n"
                                 f"## Org rules\n{tenant_md[:2000]}\n\n"
                                 f"## User preferences\n{user_md[:500]}\n\n"
                                 f"## Recent claims\n{claims_summary}\n\n"

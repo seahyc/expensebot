@@ -85,17 +85,15 @@ PARSE_TOOL = {
 }
 
 
-SYSTEM_PROMPT = """You parse expense receipts for OmniHR.
+SYSTEM_PROMPT = """You parse expense receipts and classify them for filing.
 
-Return a single tool call with structured fields. Be conservative on confidence:
-if amount or date isn't crystal clear, flag below 0.7 so the bot asks the user.
-
-Respect the tenant's classification rules and the user's preferences below. When a
-sub-category fits a heuristic in the rules, use it. Otherwise pick the most plausible
-match and leave a note in `anomalies` if uncertain.
-
-For non-receipts (chat screenshots, selfies, irrelevant photos): set is_receipt=false
-and skip the rest. Don't make up data."""
+Return a single tool call with structured fields. Rules:
+- Be conservative on confidence: below 0.7 = bot will ask user to confirm
+- Respect the tenant's classification rules and user's preferences
+- When a sub-category fits a heuristic in the rules, use it
+- If uncertain, pick the most plausible match and note it in anomalies
+- For non-receipts (screenshots, selfies, irrelevant photos): is_receipt=false
+- Never make up data — if you can't read a field, leave it null with low confidence"""
 
 
 async def parse_receipt(
