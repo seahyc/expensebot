@@ -58,7 +58,7 @@ from omnihr_client.client import (
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
 from omnihr_client.schema import invalidate_schema
 
-from . import access, claude_oauth, legal, logging_setup, rate_limit, storage
+from . import access, claude_oauth, legal, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
 from .common.parser import parse_receipt
@@ -1003,13 +1003,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
-        return legal.html_page(
-            "expensebot",
-            "# ExpenseBot\n\n"
-            "Files OmniHR expense claims from a Telegram bot.\n\n"
-            "- [GitHub](https://github.com/seahyc/expensebot)\n"
-            "- [Terms](/terms)  ·  [Privacy](/privacy)\n",
-        )
+        return pages.LANDING_PAGE
 
     @app.get("/auth/start")
     async def auth_start(s: str = "", oauth: str = "") -> HTMLResponse:
@@ -1183,26 +1177,7 @@ async function submitKey(){{
 
     @app.get("/extension")
     async def extension_page() -> HTMLResponse:
-        return HTMLResponse(legal.html_page("ExpenseBot Extension", """
-# Chrome Extension
-
-Install the ExpenseBot Chrome extension to pair your OmniHR account.
-
-## Quick install (Developer mode)
-
-1. [Download extension.zip](/extension/download)
-2. Unzip it
-3. Open `chrome://extensions` in Chrome
-4. Toggle **Developer mode** (top right)
-5. Click **Load unpacked** → select the unzipped `extension` folder
-6. Pin the ExpenseBot icon in your toolbar
-
-Then in Telegram: `/pair` → paste the code into the extension popup.
-
-## What it does
-
-Reads your OmniHR session cookies (after you sign in normally) and securely sends them to ExpenseBot so it can file claims on your behalf. No passwords stored — just session tokens, encrypted at rest.
-"""))
+        return HTMLResponse(pages.EXTENSION_PAGE)
 
     from fastapi.responses import FileResponse
 

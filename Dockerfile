@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # WeasyPrint runtime deps (rendering email HTML to PDF)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libpango-1.0-0 libpangoft2-1.0-0 fonts-dejavu-core \
+      libpango-1.0-0 libpangoft2-1.0-0 fonts-dejavu-core zip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
