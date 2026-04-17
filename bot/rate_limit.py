@@ -25,14 +25,23 @@ DEFAULT_RULES: dict[str, Rule] = {
     "list": Rule(max_calls=60, window_seconds=60),
     "pair": Rule(max_calls=5, window_seconds=600),           # 5 pair attempts / 10min
     "setkey": Rule(max_calls=10, window_seconds=600),
+    # IP-scoped buckets for unauthenticated HTTP endpoints. Keep these tight —
+    # the pairing code is only 6 digits (1M space) so brute-forcing must be
+    # made infeasible within the 5-min TTL.
+    "ip_pair": Rule(max_calls=10, window_seconds=600),       # 10 POSTs / 10min / IP
 }
 
 
-_buckets: dict[tuple[int, str], deque[float]] = defaultdict(deque)
+_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
-def check(user_id: int, kind: str, *, rules: dict[str, Rule] | None = None) -> tuple[bool, int]:
+def check(
+    user_id: int | str, kind: str, *, rules: dict[str, Rule] | None = None
+) -> tuple[bool, int]:
     """Returns (allowed, retry_after_seconds). retry_after=0 when allowed.
+
+    `user_id` is an opaque bucket key — use the DB user id for per-user buckets
+    and the client IP for anonymous HTTP endpoints.
 
     Call on every attempt. Records the timestamp only when allowed (so retries
     after rate-limit don't worsen the backoff)."""
@@ -41,7 +50,7 @@ def check(user_id: int, kind: str, *, rules: dict[str, Rule] | None = None) -> t
     if not rule:
         return True, 0
     now = time.time()
-    key = (user_id, kind)
+    key = (str(user_id), kind)
     q = _buckets[key]
     cutoff = now - rule.window_seconds
     while q and q[0] < cutoff:
@@ -53,11 +62,12 @@ def check(user_id: int, kind: str, *, rules: dict[str, Rule] | None = None) -> t
     return True, 0
 
 
-def reset(user_id: int, kind: str | None = None) -> None:
+def reset(user_id: int | str, kind: str | None = None) -> None:
     """For tests / admin ops."""
+    sid = str(user_id)
     if kind is None:
         for k in list(_buckets.keys()):
-            if k[0] == user_id:
+            if k[0] == sid:
                 _buckets.pop(k, None)
     else:
-        _buckets.pop((user_id, kind), None)
+        _buckets.pop((sid, kind), None)

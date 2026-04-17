@@ -5,7 +5,9 @@ services:
       POSTGRES_USER: expensebot
       POSTGRES_PASSWORD: expensebot
       POSTGRES_DB: expensebot
-    ports: ["5432:5432"]
+    # Bind to loopback only so a dev box with a public IP doesn't expose
+    # postgres (trivial creds above) to the internet.
+    ports: ["127.0.0.1:5432:5432"]
     volumes: ["./pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U expensebot"]
@@ -13,7 +15,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    # Loopback-only; Redis has no auth here.
+    ports: ["127.0.0.1:6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
