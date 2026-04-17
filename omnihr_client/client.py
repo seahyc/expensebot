@@ -19,27 +19,28 @@ log = logging.getLogger(__name__)
 # OmniHR lifecycle:  Draft → Submitted (For Approval) → Approved → Reimbursed
 #
 # Proven values:
-#   3 = DRAFT          (created via /draft/ returns this)
-#   7 = FOR APPROVAL   (after submit — "Submitted" tab, "For Approval" filter)
-#   8 = DELETED        (quick_action action=1 returns this)
-# Likely (from UI dropdown, need to verify when a claim transitions):
-#   1 = APPROVED
-#   2 = REIMBURSED
-#   4, 5, 6 = other/rejected flavors (TBD)
+# Proven via API + web UI (Glints tenant):
+#   3 = DRAFT          (created via /draft/)
+#   7 = APPROVED       (confirmed from web UI screenshot: claims show "APPROVED" badge at status=7)
+#   8 = DELETED        (quick_action action=1)
+# From web UI filter dropdown "For Approval/Approved/Reimbursed" → status_filters=4,7,5:
+#   4 = FOR APPROVAL   (web UI Submitted tab, "For Approval" filter)
+#   5 = REIMBURSED     (web UI "Reimbursed" filter)
+#   1, 2, 6 = other states (TBD)
 STATUS_DRAFT = 3
-STATUS_FOR_APPROVAL = 7
-STATUS_APPROVED = 1  # tentative
-STATUS_REIMBURSED = 2  # tentative
+STATUS_FOR_APPROVAL = 4
+STATUS_APPROVED = 7
+STATUS_REIMBURSED = 5
 STATUS_DELETED = 8
 
 STATUS_LABELS: dict[int, str] = {
-    1: "APPROVED",
-    2: "REIMBURSED",
+    1: "?",
+    2: "?",
     3: "DRAFT",
-    4: "?",
-    5: "?",
+    4: "FOR APPROVAL",
+    5: "REIMBURSED",
     6: "REJECTED",
-    7: "FOR APPROVAL",
+    7: "APPROVED",
     8: "DELETED",
 }
 
@@ -48,15 +49,15 @@ ACTIVE_STATUS_FILTERS = "1,2,3,4,5,6,7"
 
 # Named filter shortcuts for /list <filter>
 FILTER_SHORTCUTS: dict[str, str] = {
-    "all": "1,2,3,4,5,6,7",
+    "all": "3,4,5,7",
     "draft": "3",
     "drafts": "3",
-    "submitted": "7",
-    "pending": "7",
-    "approval": "7",
-    "approved": "1",
-    "reimbursed": "2",
-    "paid": "2",
+    "submitted": "4",
+    "pending": "4",
+    "approval": "4",
+    "approved": "7",
+    "reimbursed": "5",
+    "paid": "5",
 }
 
 # Quick-action codes (POST /expense-metadata/{id}/quick-actions/ {action: N})

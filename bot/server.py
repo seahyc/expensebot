@@ -49,6 +49,7 @@ from omnihr_client.client import (
     FILTER_SHORTCUTS,
     QUICK_ACTION_DELETE,
     QUICK_ACTION_SUBMIT,
+    STATUS_APPROVED,
     STATUS_DRAFT,
     STATUS_FOR_APPROVAL,
     STATUS_LABELS,
@@ -268,6 +269,8 @@ def _claim_buttons(r: dict[str, Any]) -> InlineKeyboardMarkup | None:
         row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"delete:{claim_id}"))
     elif status == STATUS_FOR_APPROVAL:
         row.append(InlineKeyboardButton("🗑 Withdraw", callback_data=f"delete:{claim_id}"))
+    elif status == STATUS_APPROVED:
+        pass  # no actions needed — it's approved
     return InlineKeyboardMarkup([row]) if row else None
 
 
