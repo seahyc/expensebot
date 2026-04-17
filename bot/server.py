@@ -1183,12 +1183,13 @@ async function submitKey(){{
 
     @app.get("/extension/download")
     async def extension_download() -> FileResponse:
-        import subprocess, tempfile
-        # Build fresh zip each time (small, ensures latest code)
+        import zipfile, tempfile
         zip_path = Path(tempfile.gettempdir()) / "expensebot-extension.zip"
         ext_dir = REPO_ROOT / "extension"
-        subprocess.run(["zip", "-rj", str(zip_path), str(ext_dir)],
-                       capture_output=True, check=True)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in ext_dir.rglob("*"):
+                if f.is_file() and not f.name.startswith("."):
+                    zf.write(f, f"extension/{f.relative_to(ext_dir)}")
         return FileResponse(zip_path, filename="expensebot-extension.zip",
                             media_type="application/zip")
 
