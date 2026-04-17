@@ -190,86 +190,26 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME)
 
 
-_login_procs: dict[str, asyncio.subprocess.Process] = {}  # session_id → proc
-
-
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start Claude login via our web page bridge."""
+    """Start pure OAuth PKCE flow — no subprocess, scales to unlimited users."""
     if not await _gate(update):
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
-    tid = update.effective_user.id
 
-    progress = await update.message.reply_text("⏳ Starting login…")
-
-    # Start claude auth login on the server
-    proc = await asyncio.subprocess.create_subprocess_exec(
-        "claude", "auth", "login", "--claudeai",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        stdin=asyncio.subprocess.PIPE,
-    )
-
-    # Extract the OAuth URL
-    oauth_url = None
-    try:
-        while True:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
-            if not line:
-                break
-            text = line.decode().strip()
-            log.info("claude login: %s", text[:100])
-            if "https://" in text:
-                import re
-                urls = re.findall(r'https://[^\s]+', text)
-                if urls:
-                    oauth_url = urls[0]
-                    break
-    except asyncio.TimeoutError:
-        pass
-
-    if not oauth_url:
-        await progress.edit_text("Couldn't start login. Try again.")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return
-
-    # Store proc keyed by a session for the web page to complete
-    session_id = secrets.token_urlsafe(16)
-    _login_procs[session_id] = proc
-    # Also store user mapping
-    claude_oauth._pending[session_id] = claude_oauth.PendingAuth(
-        state=session_id,
-        code_verifier="",  # not used in this flow
-        redirect_uri="",
-        telegram_user_id=tid,
+    oauth_url, state = claude_oauth.start_login(
+        telegram_user_id=update.effective_user.id,
         user_db_id=user_db_id,
-        created_at=datetime.now(timezone.utc),
     )
 
     from urllib.parse import quote
-    bridge_url = f"{PUBLIC_BASE_URL}/auth/start?s={session_id}&oauth={quote(oauth_url, safe='')}"
+    bridge_url = f"{PUBLIC_BASE_URL}/auth/start?s={state}&oauth={quote(oauth_url, safe='')}"
 
-    await progress.edit_text(
+    await update.message.reply_text(
         f"[👆 Tap to sign in with Claude]({bridge_url})\n\n"
-        f"_(opens a page that guides you through — takes 30 seconds)_",
+        f"_(opens a page — authorize, then paste the callback URL)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
-
-    # Auto-cleanup after 10 min
-    async def _cleanup():
-        await asyncio.sleep(600)
-        if session_id in _login_procs:
-            try:
-                _login_procs[session_id].kill()
-            except Exception:
-                pass
-            _login_procs.pop(session_id, None)
-            claude_oauth._pending.pop(session_id, None)
-    asyncio.create_task(_cleanup())
 
 
 async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1011,7 +951,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
 
     @app.get("/auth/start")
     async def auth_start(s: str = "", oauth: str = "") -> HTMLResponse:
-        """Bridge page: guides user through OAuth + captures callback URL."""
+        """Bridge page: OAuth sign-in OR API key — both options on one page."""
         if not s or not oauth:
             return HTMLResponse("<h1>Invalid link</h1><p>Try /login again.</p>", status_code=400)
         page = f"""<!doctype html>
@@ -1022,44 +962,63 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#eee;
        min-height:100vh;display:flex;align-items:center;justify-content:center}}
-  .c{{background:#16213e;border-radius:16px;padding:28px;max-width:400px;width:92%;text-align:center}}
-  h1{{font-size:20px;margin-bottom:12px}}
-  p{{font-size:14px;color:#aaa;margin:12px 0;line-height:1.5}}
+  .c{{background:#16213e;border-radius:16px;padding:28px;max-width:420px;width:92%}}
+  h1{{font-size:20px;margin-bottom:4px;text-align:center}}
+  .sub{{font-size:13px;color:#888;text-align:center;margin-bottom:20px}}
+  p{{font-size:14px;color:#aaa;margin:10px 0;line-height:1.5}}
   a.btn{{display:block;background:#6633ee;color:#fff;padding:14px;border-radius:8px;
-        text-decoration:none;font-size:16px;font-weight:600;margin:16px 0}}
+        text-decoration:none;font-size:16px;font-weight:600;margin:12px 0;text-align:center}}
+  .or{{text-align:center;color:#555;margin:16px 0;font-size:13px;position:relative}}
+  .or::before,.or::after{{content:'';position:absolute;top:50%;width:35%;height:1px;background:#333}}
+  .or::before{{left:0}} .or::after{{right:0}}
   input{{width:100%;padding:12px;border-radius:8px;border:1px solid #333;
-        background:#0f3460;color:#eee;font-size:13px;margin:8px 0}}
+        background:#0f3460;color:#eee;font-size:13px;margin:6px 0}}
   button{{width:100%;padding:14px;border-radius:8px;border:0;background:#6633ee;
          color:#fff;font-size:16px;font-weight:600;cursor:pointer;margin:8px 0}}
   button:disabled{{background:#444;cursor:default}}
-  .ok{{background:#1a4d2e;padding:20px;border-radius:12px;margin:16px 0}}
-  .err{{background:#4d1a1a;padding:12px;border-radius:8px;margin:12px 0;font-size:13px}}
+  .btn2{{background:#2d4a7a}}
+  .ok{{background:#1a4d2e;padding:20px;border-radius:12px;margin:16px 0;text-align:center}}
+  .err{{background:#4d1a1a;padding:12px;border-radius:8px;margin:10px 0;font-size:13px}}
   .hide{{display:none}}
+  .small{{font-size:11px;color:#555;text-align:center;margin-top:4px}}
 </style></head><body>
 <div class="c">
   <h1>🧾 ExpenseBot</h1>
+  <div class="sub">Connect your AI to parse receipts</div>
 
+  <!-- OPTION 1: Claude subscription -->
   <div id="s1">
-    <p>Sign in with your Claude subscription</p>
-    <a class="btn" href="{oauth}" id="authBtn">Authorize with Claude →</a>
-    <p style="font-size:12px;color:#666">After authorizing, copy the URL from your browser's address bar and paste it below.</p>
+    <a class="btn" href="{oauth}" id="authBtn">Sign in with Claude subscription →</a>
+    <p class="small">Uses your existing Claude Pro/Max plan. No extra billing.</p>
+
+    <div class="or">or</div>
+
+    <!-- OPTION 2: API key -->
+    <p style="color:#ccc;font-size:13px">Paste an Anthropic API key:</p>
+    <input id="apikey" placeholder="sk-ant-api03-..." autocomplete="off">
+    <button class="btn2" onclick="submitKey()">Use API Key</button>
+    <p class="small">Get one at <a href="https://console.anthropic.com/settings/keys" style="color:#6699cc">console.anthropic.com</a> (~$0.02/receipt)</p>
   </div>
 
+  <!-- STEP 2: paste callback URL (after OAuth) -->
   <div id="s2" class="hide">
     <p style="color:#eee">✅ Authorized! Now paste the callback URL:</p>
+    <p class="small">Copy the URL from your browser's address bar after authorizing</p>
     <input id="url" placeholder="https://platform.claude.com/oauth/code/callback?code=..." autocomplete="off" autofocus>
-    <button id="btn" onclick="go()">Complete Login</button>
+    <button onclick="submitCode()">Complete Login</button>
     <div id="st"></div>
   </div>
 
+  <!-- DONE -->
   <div id="s3" class="hide">
     <div class="ok">
-      <h2>✅ Logged in!</h2>
-      <p style="color:#aaa;margin-top:8px">Go back to Telegram — your bot is ready.</p>
+      <h2>✅ Connected!</h2>
+      <p style="color:#aaa;margin-top:8px">Go back to Telegram — send a receipt to test.</p>
     </div>
   </div>
 </div>
 <script>
+const S='{s}';
 document.getElementById('authBtn').addEventListener('click',function(){{
   setTimeout(()=>{{
     document.getElementById('s1').classList.add('hide');
@@ -1068,73 +1027,60 @@ document.getElementById('authBtn').addEventListener('click',function(){{
 }});
 window.addEventListener('focus',function(){{
   if(!document.getElementById('s1').classList.contains('hide')) return;
+  document.getElementById('s1').classList.add('hide');
   document.getElementById('s2').classList.remove('hide');
 }});
-async function go(){{
+async function post(url,body){{
+  const r=await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+  return [r, await r.json()];
+}}
+async function submitCode(){{
   const input=document.getElementById('url').value.trim();
   const st=document.getElementById('st');
-  const btn=document.getElementById('btn');
   let code=null;
   const m=input.match(/[?&]code=([A-Za-z0-9_\\-]+)/);
   if(m) code=m[1];
   else if(input.length>20&&/^[A-Za-z0-9_\\-]+$/.test(input)) code=input;
-  if(!code){{st.innerHTML='<div class="err">Couldn\\'t find the code. Paste the full URL from the address bar.</div>';return;}}
-  btn.disabled=true;btn.textContent='Completing…';
+  if(!code){{st.innerHTML='<div class="err">Paste the full URL from the address bar.</div>';return;}}
   try{{
-    const r=await fetch('/auth/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{session:'{s}',code:code}})}});
-    const d=await r.json();
-    if(r.ok&&d.ok){{
-      document.getElementById('s2').classList.add('hide');
-      document.getElementById('s3').classList.remove('hide');
-    }}else{{
-      st.innerHTML='<div class="err">'+(d.detail||'Failed. Try /login again.')+'</div>';
-      btn.disabled=false;btn.textContent='Complete Login';
-    }}
-  }}catch(e){{
-    st.innerHTML='<div class="err">'+e.message+'</div>';
-    btn.disabled=false;btn.textContent='Complete Login';
-  }}
+    const[r,d]=await post('/auth/complete',{{session:S,code:code}});
+    if(r.ok&&d.ok){{document.getElementById('s2').classList.add('hide');document.getElementById('s3').classList.remove('hide');}}
+    else st.innerHTML='<div class="err">'+(d.detail||'Failed')+'</div>';
+  }}catch(e){{st.innerHTML='<div class="err">'+e.message+'</div>';}}
+}}
+async function submitKey(){{
+  const key=document.getElementById('apikey').value.trim();
+  if(!key.startsWith('sk-ant-')){{alert('Key should start with sk-ant-');return;}}
+  try{{
+    const[r,d]=await post('/auth/setkey',{{session:S,key:key}});
+    if(r.ok&&d.ok){{document.getElementById('s1').classList.add('hide');document.getElementById('s3').classList.remove('hide');}}
+    else alert(d.detail||'Failed');
+  }}catch(e){{alert(e.message);}}
 }}
 </script></body></html>"""
         return HTMLResponse(page)
 
     @app.post("/auth/complete")
     async def auth_complete(payload: dict[str, Any]) -> dict:
-        """Receive the OAuth code from the bridge page, feed to claude auth login."""
-        session_id = payload.get("session", "")
+        """Exchange OAuth code for tokens (pure PKCE, no subprocess)."""
+        state = payload.get("session", "")
         code = payload.get("code", "")
-        if not session_id or not code:
+        if not state or not code:
             raise HTTPException(400, "Missing session or code")
 
-        proc = _login_procs.pop(session_id, None)
-        pending = claude_oauth._pending.pop(session_id, None)
-        if not proc or not pending:
-            raise HTTPException(404, "Session expired. Run /login again.")
+        ok, msg, token_data = await claude_oauth.exchange_code(state, code)
+        if not ok or not token_data:
+            raise HTTPException(400, msg)
 
-        # Feed code to claude auth login stdin
-        try:
-            proc.stdin.write((code + "\n").encode())
-            await proc.stdin.drain()
-            proc.stdin.close()
-            returncode = await asyncio.wait_for(proc.wait(), timeout=30)
-        except Exception as e:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            raise HTTPException(500, f"Login subprocess failed: {e}")
-
-        if returncode != 0:
-            raise HTTPException(400, f"Login failed (exit {returncode}). Try /login again.")
-
-        # Mark user as using subscription
-        storage.set_anth_key(pending.user_db_id, "__claude_subscription__")
+        # Store the access token per-user (encrypted)
+        storage.set_anth_key(token_data["user_db_id"], token_data["access_token"])
+        # TODO: also store refresh_token for auto-refresh
 
         # DM the user
         if tg_app:
             try:
                 await tg_app.bot.send_message(
-                    chat_id=pending.telegram_user_id,
+                    chat_id=token_data["telegram_user_id"],
                     text=(
                         "✅ Claude subscription linked!\n"
                         "Your receipts will be parsed using your Claude plan — no API key needed.\n"
@@ -1144,6 +1090,30 @@ async function go(){{
             except Exception as e:
                 log.warning("couldn't DM after login: %s", e)
 
+        return {"ok": True}
+
+    @app.post("/auth/setkey")
+    async def auth_setkey(payload: dict[str, Any]) -> dict:
+        """Set API key via the web page (alternative to OAuth)."""
+        state = payload.get("session", "")
+        key = payload.get("key", "").strip()
+        if not state or not key:
+            raise HTTPException(400, "Missing session or key")
+        pending = claude_oauth._pending.pop(state, None)
+        if not pending:
+            raise HTTPException(404, "Session expired. Run /login again.")
+        if not _plausible_anth_key(key):
+            raise HTTPException(400, "Invalid key format. Should start with sk-ant-")
+
+        storage.set_anth_key(pending.user_db_id, key)
+        if tg_app:
+            try:
+                await tg_app.bot.send_message(
+                    chat_id=pending.telegram_user_id,
+                    text="✅ API key saved! Send a receipt to test.",
+                )
+            except Exception:
+                pass
         return {"ok": True}
 
     @app.get("/terms", response_class=HTMLResponse)
