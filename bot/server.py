@@ -249,7 +249,8 @@ async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         created_at=datetime.now(timezone.utc),
     )
 
-    bridge_url = f"{PUBLIC_BASE_URL}/auth/start?s={session_id}&oauth={oauth_url}"
+    from urllib.parse import quote
+    bridge_url = f"{PUBLIC_BASE_URL}/auth/start?s={session_id}&oauth={quote(oauth_url, safe='')}"
 
     await progress.edit_text(
         f"[👆 Tap to sign in with Claude]({bridge_url})\n\n"
