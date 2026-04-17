@@ -129,11 +129,21 @@ def client_for(user: dict) -> OmniHRClient:
 _ANTH_PLACEHOLDER_PREFIXES = ("sk-ant-...", "sk-ant-xxx", "sk-ant-your")
 
 
+def _is_oauth_token(cred: str | None) -> bool:
+    """Claude OAuth subscription tokens start with 'sk-ant-oat'."""
+    return bool(cred) and cred.startswith("sk-ant-oat")
+
+
 def _plausible_anth_key(key: str | None) -> bool:
+    """True iff this is a real Anthropic API key (sk-ant-api03-...).
+    Rejects OAuth subscription tokens, which share the sk-ant- prefix but
+    need bearer-token auth, not x-api-key auth."""
     if not key:
         return False
     low = key.strip().lower()
     if any(low.startswith(p) for p in _ANTH_PLACEHOLDER_PREFIXES):
+        return False
+    if _is_oauth_token(key):
         return False
     return key.startswith("sk-ant-") and len(key) > 30
 
@@ -142,17 +152,16 @@ def anthropic_for(user: dict) -> AsyncAnthropic:
     """Build an Anthropic client for this user.
 
     Two credential types are possible:
-      1. API key (starts with 'sk-ant-')  → x-api-key header, billed to the
-         API-key org.
-      2. OAuth access token (from /login) → Authorization: Bearer header,
-         billed to the user's Claude subscription. Requires the
+      1. API key (starts with 'sk-ant-api03-')  → x-api-key header, billed
+         to the API-key org.
+      2. OAuth access token ('sk-ant-oat...')   → Authorization: Bearer
+         header, billed to the user's Claude subscription. Requires the
          oauth-2025-04-20 beta header.
     """
     user_cred = storage.get_anth_key(user["id"])
     maintainer_key = os.environ.get("MAINTAINER_ANTHROPIC_API_KEY", "").strip()
 
-    if user_cred and not _plausible_anth_key(user_cred):
-        # Treat as an OAuth subscription token.
+    if _is_oauth_token(user_cred):
         return AsyncAnthropic(
             auth_token=user_cred,
             max_retries=0,
