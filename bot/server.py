@@ -363,9 +363,17 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             if action == "submit":
                 await client.submit_draft(claim_id)
                 await _reply(f"📤 Submitted *#{claim_id}*.")
+                try:
+                    await q.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
             elif action == "delete":
                 await client.delete_submission(claim_id)
                 await _reply(f"🗑 Deleted *#{claim_id}*")
+                try:
+                    await q.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
             else:
                 await q.answer(f"Unknown action: {action}", show_alert=True)
     except AuthError:
