@@ -9,6 +9,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./expensebot.db:/app/expensebot.db
+      # Mount host's Claude Code for Agent SDK (subscription auth)
+      - /home/opc/.claude:/root/.claude:ro
+      - /usr/lib/node_modules/@anthropic-ai:/usr/lib/node_modules/@anthropic-ai:ro
+      - /usr/bin/claude:/usr/local/bin/claude:ro
+      - /usr/bin/node:/usr/local/bin/node:ro
     networks:
       - backend_default
     # exposed internally only; Caddy reverse-proxies to expensebot:8000
