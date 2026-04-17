@@ -59,6 +59,7 @@ from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationErro
 from omnihr_client.schema import invalidate_schema
 
 from . import access, claude_oauth, legal, logging_setup, rate_limit, storage
+from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
 from .common.parser import parse_receipt
 
@@ -583,8 +584,86 @@ async def cmd_delete_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("✅ Account purged.")
 
 
+async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_type: str = "", filename: str = ""):
+    """Build a tool executor closure for the agent, bound to this user + file."""
+
+    async def execute(tool_name: str, tool_input: dict) -> str:
+        if tool_name == "parse_receipt":
+            if not file_bytes:
+                return "No receipt file attached. Ask the user to send a photo or PDF."
+            tenant_md = load_tenant_md(u.get("tenant_id"))
+            user_md = load_user_md(u)
+            try:
+                parsed = await parse_receipt(
+                    anthropic=anthropic_for(u),
+                    file_bytes=file_bytes,
+                    media_type=media_type,
+                    tenant_md=tenant_md,
+                    user_md=user_md,
+                    recent_claims_summary="",
+                    active_trip=None,
+                )
+                return json.dumps(parsed.raw, default=str)
+            except Exception as e:
+                return f"Parse failed: {e}"
+
+        elif tool_name == "list_claims":
+            status_key = tool_input.get("status", "all")
+            filters = FILTER_SHORTCUTS.get(status_key, ACTIVE_STATUS_FILTERS)
+            async with client_for(u) as client:
+                data = await client.list_submissions(status_filters=filters, page_size=15)
+            rows = data.get("results", [])
+            if not rows:
+                return f"No {status_key} claims found."
+            lines = []
+            for r in rows:
+                sl = STATUS_LABELS.get(r.get("status", 0), "?")
+                lines.append(
+                    f"#{r['id']} {r.get('receipt_date','?')} "
+                    f"{r.get('amount_currency','?')} {r.get('amount','?')} "
+                    f"{r.get('merchant') or '?'} [{sl}] "
+                    f"{(r.get('description') or '')[:50]}"
+                )
+            return "\n".join(lines)
+
+        elif tool_name == "submit_claim":
+            cid = tool_input["claim_id"]
+            async with client_for(u) as client:
+                await client.submit_draft(cid)
+            return f"Submitted #{cid} for approval."
+
+        elif tool_name == "delete_claim":
+            cid = tool_input["claim_id"]
+            async with client_for(u) as client:
+                await client.delete_submission(cid)
+            return f"Deleted #{cid}."
+
+        elif tool_name == "get_claim_summary":
+            async with client_for(u) as client:
+                data = await client.list_submissions(page_size=30)
+            rows = data.get("results", [])
+            if not rows:
+                return "No claims found."
+            # Build a summary for Claude to interpret
+            lines = []
+            for r in rows:
+                sl = STATUS_LABELS.get(r.get("status", 0), "?")
+                lines.append(
+                    f"#{r['id']} date={r.get('receipt_date','?')} "
+                    f"amt={r.get('amount_currency','?')} {r.get('amount','?')} "
+                    f"merchant={r.get('merchant') or '?'} "
+                    f"policy={(r.get('policy') or {}).get('name','?')} "
+                    f"status={sl}"
+                )
+            return f"Claims ({len(rows)} total):\n" + "\n".join(lines)
+
+        return f"Unknown tool: {tool_name}"
+
+    return execute
+
+
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch-all for free-form text — routes through Claude for questions."""
+    """All non-command text → agent with tools."""
     if not await _gate(update):
         return
     msg = update.message
@@ -597,84 +676,40 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
-    # Need Anthropic key for the conversational layer
     try:
         anth = anthropic_for(u)
     except RuntimeError:
-        await msg.reply_text("Set your API key first: /setkey sk-ant-…")
+        await msg.reply_text("Connect first: /login")
         return
 
     if not await _check_rate(update, u["id"], "parse"):
         return
 
-    # Build context: recent claims from OmniHR (if paired)
-    claims_summary = "(not paired — no claims data available)"
-    if u.get("access_jwt"):
-        try:
-            async with client_for(u) as client:
-                data = await client.list_submissions(page_size=20)
-                rows = data.get("results", [])
-                if rows:
-                    lines = []
-                    for r in rows:
-                        status_label = STATUS_LABELS.get(r.get("status", 0), "?")
-                        lines.append(
-                            f"- #{r['id']} {r.get('receipt_date','?')} "
-                            f"{r.get('amount_currency','?')} {r.get('amount','?')} "
-                            f"{r.get('merchant') or '?'} — {(r.get('policy') or {}).get('name','?')} "
-                            f"[{status_label}] "
-                            f"{(r.get('description') or '')[:60]}"
-                        )
-                    claims_summary = "\n".join(lines)
-                else:
-                    claims_summary = "(no claims found)"
-        except Exception as e:
-            claims_summary = f"(couldn't fetch claims: {e})"
-
+    progress = await msg.reply_text("🤔")
     tenant_md = load_tenant_md(u.get("tenant_id"))
-    user_md = load_user_md(u)
+    executor = await _build_tool_executor(u)
 
-    # Single Claude call — system prompt + HRMS skill + tenant + claims as context
-    hrms_skill = load_skill("omnihr")  # TODO: read from tenant config
     try:
-        resp = await anth.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            system=SYSTEM_PROMPT_MD,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"## HRMS integration\n{hrms_skill[:3000]}\n\n"
-                                f"## Org rules\n{tenant_md[:2000]}\n\n"
-                                f"## User preferences\n{user_md[:500]}\n\n"
-                                f"## Recent claims\n{claims_summary}\n\n"
-                                f"## User's message\n{text}"
-                            ),
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                }
-            ],
+        reply = await run_agent(
+            anthropic=anth,
+            user_message=text,
+            has_file=False,
+            tenant_md=tenant_md,
+            recent_claims="(agent will fetch via tools if needed)",
+            tool_executor=executor,
         )
-        reply = resp.content[0].text if resp.content else "I couldn't understand that."
     except Exception as e:
-        log.warning("conversational reply failed: %s", e)
-        reply = (
-            "I can help with expense claims. Try:\n"
-            "• Send a receipt photo/PDF to file a claim\n"
-            "• /list to see your claims\n"
-            "• Ask me: 'how much did I spend in April?'"
-        )
+        log.warning("agent failed: %s", e)
+        reply = f"Something went wrong: {e}"
 
-    await msg.reply_text(reply, parse_mode="Markdown")
+    try:
+        await progress.edit_text(reply, parse_mode="Markdown")
+    except Exception:
+        await progress.edit_text(reply)  # fallback without markdown
 
 
 async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Photo or document arrived. Parse + file as draft."""
+    """Photo or document → agent with parse_receipt tool."""
     if not await _gate(update):
         return
     msg = update.message
@@ -682,14 +717,17 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not u:
         await msg.reply_text("Hi! Run /start first.")
         return
-    if not u.get("anth_key") and not os.environ.get("MAINTAINER_ANTHROPIC_API_KEY"):
-        await msg.reply_text("Set your Anthropic key first: /setkey sk-ant-…")
+
+    try:
+        anth = anthropic_for(u)
+    except RuntimeError:
+        await msg.reply_text("Connect first: /login")
         return
     if not u.get("access_jwt"):
         await msg.reply_text("Not paired with OmniHR yet — run /pair")
         return
 
-    # Download file + capture Telegram's file_id for instant replay later
+    # Download file
     if msg.document:
         tg_file = await msg.document.get_file()
         media_type = msg.document.mime_type or "application/pdf"
