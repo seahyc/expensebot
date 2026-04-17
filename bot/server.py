@@ -59,6 +59,7 @@ from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationErro
 from omnihr_client.schema import invalidate_schema
 
 from . import access, legal, logging_setup, rate_limit, storage
+from .common.agent_parser import parse_receipt_via_agent
 from .common.parser import parse_receipt
 
 logging_setup.setup()
@@ -187,6 +188,79 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
     await update.message.reply_text(WELCOME)
+
+
+async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Proxy `claude auth login` — run on the server, send the OAuth URL to user."""
+    if not await _gate(update):
+        return
+    user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+
+    progress = await update.message.reply_text("Starting Claude login…")
+
+    proc = await asyncio.subprocess.create_subprocess_exec(
+        "claude", "auth", "login", "--claudeai",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        stdin=asyncio.subprocess.PIPE,
+    )
+
+    # Read stdout line-by-line to find the URL
+    url_found = None
+    try:
+        while True:
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
+            if not line:
+                break
+            text = line.decode().strip()
+            log.info("claude login stdout: %s", text[:80])
+            if "https://claude.com/" in text or "https://platform.claude.com/" in text:
+                # Extract URL from the line
+                import re
+                urls = re.findall(r'https://[^\s]+', text)
+                if urls:
+                    url_found = urls[0]
+                    break
+    except asyncio.TimeoutError:
+        pass
+
+    if not url_found:
+        await progress.edit_text("Couldn't get login URL. Try again or run `claude auth login` on the server manually.")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
+
+    await progress.edit_text(
+        f"👆 [Tap here to sign in with your Claude subscription]({url_found})\n\n"
+        f"After signing in, come back here — I'll detect it automatically.\n"
+        f"_(expires in 5 minutes)_",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
+    )
+
+    # Wait for the login to complete (subprocess exits on success)
+    try:
+        returncode = await asyncio.wait_for(proc.wait(), timeout=300)
+        if returncode == 0:
+            await update.message.reply_text(
+                "✅ Claude subscription linked! Your receipts will be parsed using your Claude plan.\n"
+                "No API key needed. Send a receipt to test."
+            )
+            # Mark user as using subscription auth
+            storage.set_anth_key(user_db_id, "__claude_subscription__")
+        else:
+            await update.message.reply_text(
+                f"Login failed (exit {returncode}). Try `/login` again.",
+                parse_mode="Markdown",
+            )
+    except asyncio.TimeoutError:
+        await update.message.reply_text("Login timed out (5 min). Try `/login` again.")
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -715,20 +789,49 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             recent_summary = "(couldn't fetch recent claims)"
 
-        # Parse
+        # Parse — try Agent SDK first (subscription auth), fall back to direct API
+        parsed = None
+        agent_raw = None
         try:
-            parsed = await parse_receipt(
-                anthropic=anthropic_for(u),
+            agent_raw = await parse_receipt_via_agent(
                 file_bytes=file_bytes,
                 media_type=media_type,
+                filename=filename,
                 tenant_md=tenant_md,
                 user_md=user_md,
                 recent_claims_summary=recent_summary,
                 active_trip=None,
             )
         except Exception as e:
-            await progress.edit_text(f"Parse failed: {e}")
-            return
+            log.info("Agent SDK parse skipped: %s", e)
+
+        if agent_raw and agent_raw.get("is_receipt"):
+            # Convert agent_raw dict to ParsedReceipt
+            from .common.parser import _to_parsed_receipt
+            parsed = _to_parsed_receipt(agent_raw)
+        else:
+            # Fallback to direct Anthropic API
+            try:
+                parsed = await parse_receipt(
+                    anthropic=anthropic_for(u),
+                    file_bytes=file_bytes,
+                    media_type=media_type,
+                    tenant_md=tenant_md,
+                    user_md=user_md,
+                    recent_claims_summary=recent_summary,
+                    active_trip=None,
+                )
+            except RuntimeError as e:
+                if "No Anthropic key" in str(e):
+                    await progress.edit_text(
+                        "No API key and Agent SDK unavailable.\n"
+                        "Either: /login (use Claude subscription) or /setkey sk-ant-…"
+                    )
+                    return
+                raise
+            except Exception as e:
+                await progress.edit_text(f"Parse failed: {e}")
+                return
 
         if not parsed.is_receipt:
             await progress.edit_text("That doesn't look like a receipt — anything else?")
@@ -984,6 +1087,7 @@ async def run() -> None:
 
     tg_app = Application.builder().token(TG_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(CommandHandler("login", cmd_login))
     tg_app.add_handler(CommandHandler("whoami", cmd_whoami))
     tg_app.add_handler(CommandHandler("setkey", cmd_setkey))
     tg_app.add_handler(CommandHandler("pair", cmd_pair))
