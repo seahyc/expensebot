@@ -144,14 +144,30 @@ async def parse_receipt(
         }
     ]
 
-    resp = await anthropic.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        tools=[PARSE_TOOL],
-        tool_choice={"type": "tool", "name": "file_receipt"},
-        messages=messages,
-    )
+    # Retry with backoff for 429 (Claude subscription tokens have tight rate limits)
+    import asyncio as _aio
+    last_err = None
+    for attempt in range(4):
+        try:
+            resp = await anthropic.messages.create(
+                model="claude-sonnet-4-5-20250514",
+                max_tokens=1024,
+                system=SYSTEM_PROMPT,
+                tools=[PARSE_TOOL],
+                tool_choice={"type": "tool", "name": "file_receipt"},
+                messages=messages,
+            )
+            break
+        except Exception as e:
+            last_err = e
+            if "429" in str(e) or "rate_limit" in str(e).lower():
+                wait = (2 ** attempt) * 5  # 5, 10, 20, 40s
+                log.warning("rate limited, retry %d in %ds", attempt + 1, wait)
+                await _aio.sleep(wait)
+            else:
+                raise
+    else:
+        raise last_err  # type: ignore[misc]
 
     tool_use = next((b for b in resp.content if b.type == "tool_use"), None)
     if not tool_use:
