@@ -139,9 +139,27 @@ def _plausible_anth_key(key: str | None) -> bool:
 
 
 def anthropic_for(user: dict) -> AsyncAnthropic:
-    user_key = storage.get_anth_key(user["id"])
+    """Build an Anthropic client for this user.
+
+    Two credential types are possible:
+      1. API key (starts with 'sk-ant-')  → x-api-key header, billed to the
+         API-key org.
+      2. OAuth access token (from /login) → Authorization: Bearer header,
+         billed to the user's Claude subscription. Requires the
+         oauth-2025-04-20 beta header.
+    """
+    user_cred = storage.get_anth_key(user["id"])
     maintainer_key = os.environ.get("MAINTAINER_ANTHROPIC_API_KEY", "").strip()
-    key = user_key if _plausible_anth_key(user_key) else (
+
+    if user_cred and not _plausible_anth_key(user_cred):
+        # Treat as an OAuth subscription token.
+        return AsyncAnthropic(
+            auth_token=user_cred,
+            max_retries=0,
+            default_headers={"anthropic-beta": "oauth-2025-04-20"},
+        )
+
+    key = user_cred if _plausible_anth_key(user_cred) else (
         maintainer_key if _plausible_anth_key(maintainer_key) else None
     )
     if not key:
