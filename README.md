@@ -12,7 +12,7 @@ The architecture below is the design we're building toward, not what's shipped t
 
 Send a receipt photo or PDF to the bot. It:
 
-1. Parses the receipt (Claude Sonnet 4.5, structured output)
+1. Parses the receipt (Claude Haiku 4.5, structured output via tool use)
 2. Classifies into the right OmniHR policy + sub-category for your tenant
 3. Files as a draft (or submits, if you say so) via the OmniHR API
 4. Tracks status, DMs you when approved/rejected/paid
@@ -48,7 +48,7 @@ user's active omnihr.co session in background.
 
 | Tier | Cost | API key |
 |---|---|---|
-| **Free / BYOK** | $0/mo + Anthropic API costs (~$0.02/receipt) | User's Anthropic key |
+| **Free / BYOK** | $0/mo + Anthropic API costs (~$0.005/receipt) | User's Anthropic key |
 | **Managed** | $5/mo (fair-use 200 receipts/mo, $0.10 overage) | Maintainer's Anthropic key |
 | **Future: Claude OAuth** | TBD when Anthropic ships consumer OAuth | OAuth |
 
@@ -61,7 +61,7 @@ Bot backend (FastAPI)
       ↓  ↓  ↓
    Postgres  Redis  S3 (24h receipt cache)
       ↓
-Claude API (Sonnet 4.5)  +  OmniHR API
+Claude API (Haiku 4.5)  +  OmniHR API
 ```
 
 Extension lives in user's Chrome, talks to backend over HTTPS.
@@ -101,13 +101,13 @@ Most operations don't touch Claude:
 | Status poller DMs | No |
 | Dupe check on file SHA | No |
 | Edit field on existing draft | No |
-| Receipt parse + classify | 1 Sonnet call (~$0.005 with prompt cache) |
-| Routing ambiguous chat message | 1 Haiku call (~$0.0001) |
+| Receipt parse + classify | 1 Haiku 4.5 call (~$0.002 with prompt cache) |
+| Routing ambiguous chat message | 1 Haiku 4.5 call (~$0.0001) |
 
 Prompt-caching: tenant.md + user.md + last 10 claims context cached for 5 min,
 90% discount on repeated tokens.
 
-Result: 100 receipts/mo ≈ $0.50 actual LLM cost.
+Result: 100 receipts/mo ≈ $0.20 actual LLM cost.
 
 ## Repo structure
 

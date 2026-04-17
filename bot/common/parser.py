@@ -110,7 +110,7 @@ async def parse_receipt(
 ) -> ParsedReceipt:
     """Single inference. Cached prompt prefix (tenant.md + user.md + recent claims).
 
-    Pricing: with prompt cache, marginal cost ~$0.005 per receipt at Sonnet 4.5.
+    Pricing: with prompt cache, marginal cost ~$0.002 per receipt at Haiku 4.5.
     """
     cached_context = (
         "## Tenant rules\n\n"
