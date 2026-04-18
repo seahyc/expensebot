@@ -47,6 +47,19 @@ RULES:
 - When listing claims, show: date, amount, merchant, status.
 - Claim IDs are numbers like #126758 — reference them so the user can act on them.
 
+MERCHANT MEMORY — the "## Merchants you've filed before" block:
+
+Auto-populated from past successful submit_claim calls. Shows each
+merchant with its most-common policy/sub-category and count. Entries
+tagged "(confident)" mean the user has filed this merchant the same
+way 3+ times — file it that way again without asking. For lower counts,
+mention the pattern but let the user confirm: "Starbucks — usually
+Meals/Coffee for you, right, darling?"
+
+If the parsed merchant matches a confident entry AND the amount is
+within a normal range, auto-file and tell them: "Starbucks again,
+$8.50 — filed as Meals/Coffee. Your usual, darling."
+
 PROFILE — who the user is (the "## About you" block):
 
 The "## About you" block in context is your always-loaded memory of this
@@ -109,11 +122,32 @@ Never write placeholder entries. Never invent memories without user consent
 in the same conversation."""
 
 
+CONFIDENT_THRESHOLD = 3
+
+
+def render_merchants_block(rows: list[dict]) -> str:
+    """Render top merchants as a bullet list for the context prompt.
+    Entries with count >= CONFIDENT_THRESHOLD are tagged '(confident)' so
+    Janai knows she can file without asking."""
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        tag = " (confident)" if r["count"] >= CONFIDENT_THRESHOLD else ""
+        sub = f"/{r['sub_category']}" if r.get("sub_category") else ""
+        lines.append(
+            f"- **{r['merchant']}** → {r['policy_id']}{sub} "
+            f"({r['count']}x){tag}"
+        )
+    return "\n".join(lines)
+
+
 def build_context_text(
     *,
     tenant_md: str,
     user_md: str,
     profile_md: str,
+    merchants: list[dict],
     recent_claims: str,
     has_file: bool,
     user_message: str,
@@ -123,11 +157,20 @@ def build_context_text(
         if profile_md.strip()
         else "## About you\n(nothing yet — I'll fill this in as I learn)\n\n"
     )
+    merchants_rendered = render_merchants_block(merchants)
+    merchants_block = (
+        f"## Merchants you've filed before\n{merchants_rendered}\n"
+        f"_(confident) = you've filed this merchant the same way 3+ times — "
+        f"file without asking._\n\n"
+        if merchants_rendered
+        else ""
+    )
     return (
         f"## Org config\n{tenant_md[:2000]}\n\n"
         f"{about_block}"
         f"## Your rules (learned from past corrections)\n"
         f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
+        f"{merchants_block}"
         f"## Recent claims\n{recent_claims[:1500]}\n\n"
         f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
         f"## User message\n{user_message}"
@@ -142,6 +185,7 @@ async def run_agent(
     tenant_md: str = "",
     user_md: str = "",
     profile_md: str = "",
+    merchants: list[dict] | None = None,
     recent_claims: str = "",
     tool_executor,  # async callable(tool_name, tool_input) -> str
     conversation_history: list[dict] | None = None,  # [{direction, body}] oldest first
@@ -172,6 +216,7 @@ async def run_agent(
                     tenant_md=tenant_md,
                     user_md=user_md,
                     profile_md=profile_md,
+                    merchants=merchants or [],
                     recent_claims=recent_claims,
                     has_file=has_file,
                     user_message=user_message,

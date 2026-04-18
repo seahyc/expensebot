@@ -254,6 +254,24 @@ class OmniHRClient:
         """Submit an existing draft. Action code currently TENTATIVE."""
         return await self.quick_action(submission_id, QUICK_ACTION_SUBMIT)
 
+    async def get_submission(self, submission_id: int) -> dict[str, Any] | None:
+        """Fetch a single submission by id.
+
+        No dedicated single-submission GET is known on OmniHR's API, so we
+        page through list_submissions and filter. Used for post-submit
+        side-effects (e.g. recording the merchant/policy pattern) where we
+        need the saved row, not just the id we submitted.
+        Returns None if the id isn't found in the first ~90 results."""
+        await self._ensure_fresh()
+        for page in (1, 2, 3):
+            data = await self.list_submissions(page=page, page_size=30)
+            for row in data.get("results", []):
+                if row.get("id") == submission_id:
+                    return row
+            if not data.get("results"):
+                break
+        return None
+
     # --- payload builder ---
 
     def _build_payload(

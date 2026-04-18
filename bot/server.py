@@ -1086,6 +1086,20 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             cid = tool_input["claim_id"]
             async with client_for(u) as client:
                 await client.submit_draft(cid)
+                # Fetch the submitted claim so we can record the merchant pattern.
+                try:
+                    claim = await client.get_submission(cid)
+                    if claim:
+                        merchant = (claim.get("merchant") or "").strip()
+                        policy_id = (claim.get("policy") or {}).get("id") or ""
+                        sub_cat = (claim.get("sub_category") or {}).get("name")
+                        if merchant and policy_id:
+                            storage.record_merchant_choice(
+                                u["id"], merchant, str(policy_id), sub_cat
+                            )
+                except Exception as e:
+                    # Recording is best-effort — don't fail the submit.
+                    log.warning("record_merchant_choice failed for #%s: %s", cid, e)
             return f"Submitted #{cid} for approval."
 
         elif tool_name == "delete_claim":
@@ -1237,6 +1251,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             tenant_md=tenant_md,
             user_md=user_md,
             profile_md=storage.get_profile_md(u["id"]),
+            merchants=storage.top_merchants(u["id"], limit=20),
             recent_claims="(agent will fetch via tools if needed)",
             tool_executor=executor,
             conversation_history=history,

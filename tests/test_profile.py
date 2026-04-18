@@ -39,6 +39,7 @@ def test_context_block_includes_profile(tmp_db, monkeypatch):
         tenant_md="tenant",
         user_md="rules",
         profile_md=storage.get_profile_md(uid),
+        merchants=[],
         recent_claims="",
         has_file=False,
         user_message="hi",
@@ -46,3 +47,22 @@ def test_context_block_includes_profile(tmp_db, monkeypatch):
     assert "Ying" in block
     assert "SIA" in block
     assert "## About you" in block
+
+
+def test_context_block_empty_profile_shows_fallback(tmp_db):
+    """Fresh users (empty profile_md) see the 'nothing yet' placeholder so
+    the agent knows to fill it in rather than silently skipping the block."""
+    from bot.common import agent
+    uid = storage.upsert_user("telegram", "u1")
+
+    block = agent.build_context_text(
+        tenant_md="tenant",
+        user_md="",
+        profile_md=storage.get_profile_md(uid),
+        merchants=[],
+        recent_claims="",
+        has_file=False,
+        user_message="hi",
+    )
+    assert "## About you" in block
+    assert "nothing yet" in block

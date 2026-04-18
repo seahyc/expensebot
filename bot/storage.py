@@ -99,6 +99,19 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS messages_user_created ON messages(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS merchant_choices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  merchant_normalized TEXT NOT NULL,
+  merchant_display TEXT NOT NULL,
+  policy_id TEXT NOT NULL,
+  sub_category TEXT,
+  count INTEGER NOT NULL DEFAULT 1,
+  last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(user_id, merchant_normalized, policy_id, sub_category)
+);
+CREATE INDEX IF NOT EXISTS merchant_choices_user ON merchant_choices(user_id, count DESC);
 """
 
 
@@ -116,8 +129,11 @@ _ADD_COLS = [
 ]
 
 
-def init_db(path: Path = DB_PATH) -> None:
-    with sqlite3.connect(path) as conn:
+def init_db(path: Path | None = None) -> None:
+    # Resolve DB_PATH lazily (not as a default-arg value frozen at import)
+    # so tests can monkeypatch storage.DB_PATH to redirect writes.
+    target = path if path is not None else DB_PATH
+    with sqlite3.connect(target) as conn:
         conn.executescript(SCHEMA)
         # idempotent column adds for already-created DBs
         for table, col, typ in _ADD_COLS:
@@ -679,3 +695,70 @@ def count_nudges_since(user_id: int, since: datetime, *, hook: str | None = None
     with db() as conn:
         row = conn.execute(sql, args).fetchone()
         return int(row["n"] or 0)
+
+
+# --- Merchant memory ---
+# Each row = "this user filed merchant M under policy P / sub_cat S N times".
+# After 3 consistent fills the agent files without asking. See
+# render_merchants_block() in bot/common/agent.py for the context-prompt side.
+
+def normalize_merchant(name: str) -> str:
+    """Collapse whitespace, lowercase, strip. Good enough for fuzzy-ish match."""
+    return " ".join((name or "").lower().split())
+
+
+def record_merchant_choice(
+    user_id: int,
+    merchant: str,
+    policy_id: str,
+    sub_category: str | None,
+) -> None:
+    """Bump the count for (user, merchant, policy, sub_cat). Insert row if new.
+    Called after submit_claim succeeds — proves the user accepted the filing.
+
+    NOTE: SQLite treats NULL as distinct in UNIQUE constraints, so a NULL
+    sub_category would never collide on ON CONFLICT and we'd get dup rows.
+    We coerce None → "" before the INSERT to make the constraint work."""
+    norm = normalize_merchant(merchant)
+    if not norm:
+        return
+    sub_key = sub_category if sub_category is not None else ""
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO merchant_choices
+               (user_id, merchant_normalized, merchant_display, policy_id, sub_category)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, merchant_normalized, policy_id, sub_category)
+               DO UPDATE SET count=count+1, last_seen=CURRENT_TIMESTAMP""",
+            (user_id, norm, merchant, policy_id, sub_key),
+        )
+
+
+def get_merchant_history(user_id: int, merchant_normalized: str) -> list[dict]:
+    """Return all (policy, sub_cat, count) rows for this merchant, most-filed first."""
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT policy_id, sub_category, count, last_seen
+               FROM merchant_choices
+               WHERE user_id=? AND merchant_normalized=?
+               ORDER BY count DESC""",
+            (user_id, merchant_normalized),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def top_merchants(user_id: int, limit: int = 20) -> list[dict]:
+    """Top merchants by total fills across all classifications.
+    Used for the context block so Janai can eyeball the pattern."""
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT merchant_display AS merchant,
+                      policy_id, sub_category, SUM(count) AS count
+               FROM merchant_choices
+               WHERE user_id=?
+               GROUP BY merchant_normalized, policy_id, sub_category
+               ORDER BY count DESC
+               LIMIT ?""",
+            (user_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
