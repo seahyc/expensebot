@@ -1358,6 +1358,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # Parse — try Agent SDK first (subscription auth), fall back to direct API
         parsed = None
         agent_raw = None
+        active_trip = f"User hint: {user_note}" if user_note else None
         try:
             agent_raw = await parse_receipt_via_agent(
                 file_bytes=file_bytes,
@@ -1366,7 +1367,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 tenant_md=tenant_md,
                 user_md=user_md,
                 recent_claims_summary=recent_summary,
-                active_trip=None,
+                active_trip=active_trip,
             )
         except Exception as e:
             log.info("Agent SDK parse skipped: %s", e)
@@ -1385,7 +1386,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     tenant_md=tenant_md,
                     user_md=user_md,
                     recent_claims_summary=recent_summary,
-                    active_trip=None,
+                    active_trip=active_trip,
                     policies=policies,
                 )
             except RuntimeError as e:
