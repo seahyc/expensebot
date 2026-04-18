@@ -48,7 +48,7 @@ def _flatten(tree: list[dict[str, Any]]) -> list[PolicyEntry]:
     """
     out: list[PolicyEntry] = []
     for node in tree or []:
-        cat = node.get("name") or node.get("label") or ""
+        cat = node.get("name") or node.get("label") or node.get("category_name") or ""
         # The node itself might be a leaf policy
         nid = node.get("id") or node.get("policy_id")
         nlabel = node.get("name") or node.get("label") or node.get("policy_name") or ""
