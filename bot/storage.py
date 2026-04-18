@@ -88,6 +88,17 @@ CREATE TABLE IF NOT EXISTS nudges (
 );
 CREATE INDEX IF NOT EXISTS nudges_user_sent ON nudges(user_id, sent_at);
 CREATE INDEX IF NOT EXISTS nudges_user_hook_sent ON nudges(user_id, hook, sent_at);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('in', 'out')),
+  body TEXT,
+  has_file INTEGER NOT NULL DEFAULT 0,
+  file_type TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS messages_user_created ON messages(user_id, created_at);
 """
 
 
@@ -604,6 +615,23 @@ def log_nudge(user_id: int, hook: str, message_preview: str) -> None:
         conn.execute(
             "INSERT INTO nudges (user_id, hook, message_preview) VALUES (?, ?, ?)",
             (user_id, hook, message_preview[:200]),
+        )
+
+
+def log_message(
+    user_id: int,
+    direction: str,
+    body: str | None = None,
+    *,
+    has_file: bool = False,
+    file_type: str | None = None,
+) -> None:
+    """Persist every inbound/outbound message for debugging. direction: 'in'|'out'."""
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO messages (user_id, direction, body, has_file, file_type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, direction, body, int(has_file), file_type),
         )
 
 

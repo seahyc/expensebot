@@ -1164,6 +1164,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
+    storage.log_message(u["id"], "in", text)
+
     # Detect OAuth token pasted in Telegram (code#state or ?code=XXX format)
     import re
     oauth_code = None
@@ -1231,6 +1233,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("agent failed: %s", e)
         reply = f"Something went wrong: {e}"
 
+    storage.log_message(u["id"], "out", reply)
     try:
         await progress.edit_text(reply, parse_mode="Markdown")
     except Exception:
@@ -1255,6 +1258,8 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     storage.bump_last_inbound_at(u["id"])
+    file_type = "photo" if update.message.photo else "document"
+    storage.log_message(u["id"], "in", msg.caption or None, has_file=True, file_type=file_type)
 
     try:
         anth = await anthropic_for(u)
