@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS trips (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS nudges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  hook TEXT NOT NULL,
+  sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  message_preview TEXT
+);
+CREATE INDEX IF NOT EXISTS nudges_user_sent ON nudges(user_id, sent_at);
+CREATE INDEX IF NOT EXISTS nudges_user_hook_sent ON nudges(user_id, hook, sent_at);
 """
 
 
@@ -90,6 +100,7 @@ _ADD_COLS = [
     ("users", "session_expired_notified_at", "TEXT"),
     ("users", "anth_refresh_token", "TEXT"),   # encrypted; for Claude OAuth
     ("users", "anth_expires_at", "TEXT"),      # ISO UTC; for Claude OAuth
+    ("users", "last_inbound_at", "TEXT"),      # ISO UTC; bumped on any inbound msg
 ]
 
 
@@ -517,3 +528,97 @@ def find_receipt_by_submission(user_id: int, sub_id: int) -> dict | None:
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# --- Nudges (proactive outbound messages) ---
+
+def bump_last_inbound_at(user_id: int) -> None:
+    """Record that the user just said something to us. Sweeper uses this to
+    avoid nudging right after a real conversation."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET last_inbound_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), user_id),
+        )
+
+
+def users_eligible_for_nudges() -> list[dict]:
+    """Paired telegram users with a live-ish refresh token. We skip users who
+    never paired (nothing to nudge about) and users whose session is dead
+    (refresh_sweeper owns that channel)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM users
+               WHERE channel='telegram'
+                 AND omnihr_employee_id IS NOT NULL
+                 AND refresh_expires_at > ?""",
+            (now_iso,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def aging_drafts_for_user(user_id: int, older_than_days: int) -> list[dict]:
+    """Drafts (status=3) older than N days for one user, oldest first.
+    Uses SQLite's datetime() to normalize the compare — receipts.created_at
+    is CURRENT_TIMESTAMP (space-separated, no offset) but our cutoff comes
+    from Python as an isoformat ('T' + offset). Without datetime() the
+    lexicographic compare silently returns wrong results."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, parsed_merchant, parsed_amount, parsed_currency, created_at
+               FROM receipts
+               WHERE user_id=? AND status=3
+                 AND datetime(created_at) < datetime(?)
+               ORDER BY datetime(created_at) ASC""",
+            (user_id, cutoff),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def month_drafts_for_user(user_id: int, year: int, month: int) -> list[dict]:
+    """Drafts (status=3) filed during a given year-month for one user.
+    `created_at` is SQLite CURRENT_TIMESTAMP, so bounds use datetime()."""
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end = f"{year + 1:04d}-01-01"
+    else:
+        end = f"{year:04d}-{month + 1:02d}-01"
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, parsed_merchant, parsed_amount, parsed_currency, created_at
+               FROM receipts
+               WHERE user_id=? AND status=3
+                 AND datetime(created_at) >= datetime(?)
+                 AND datetime(created_at) <  datetime(?)
+               ORDER BY datetime(created_at) ASC""",
+            (user_id, start, end),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def log_nudge(user_id: int, hook: str, message_preview: str) -> None:
+    """Record an outbound nudge so rate limits + per-hook suppression work."""
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO nudges (user_id, hook, message_preview) VALUES (?, ?, ?)",
+            (user_id, hook, message_preview[:200]),
+        )
+
+
+def count_nudges_since(user_id: int, since: datetime, *, hook: str | None = None) -> int:
+    """Count nudges sent to user since `since`. If `hook` is given, only that
+    kind counts — used for per-hook spacing rules.
+    Uses datetime() on both sides (same reason as aging_drafts_for_user)."""
+    sql = (
+        "SELECT COUNT(*) AS n FROM nudges "
+        "WHERE user_id=? AND datetime(sent_at) > datetime(?)"
+    )
+    args: list = [user_id, since.isoformat()]
+    if hook is not None:
+        sql += " AND hook=?"
+        args.append(hook)
+    with db() as conn:
+        row = conn.execute(sql, args).fetchone()
+        return int(row["n"] or 0)

@@ -275,14 +275,29 @@ def load_skill(hrms: str = "omnihr") -> str:
     return path.read_text() if path.exists() else ""
 
 
-STEP1_PROMPT = (
-    "💰 *Hi darling — I'm Janai, your expense secretary.*\n"
-    "I'll file your OmniHR expense claims from Telegram. Setup takes about 2 minutes — "
-    "I'll walk you through it one step at a time.\n\n"
-    "*Step 1 of 3 — connect your AI*\n"
-    "Send /login to connect your Claude Pro/Max subscription (or paste an API key). "
-    "That powers the AI I use to read your receipts."
-)
+def _first_name(full_or_first: str | None) -> str:
+    """Pick a first-name to address the user with. Falls back to 'darling'
+    so copy always reads naturally even when we have no name."""
+    if not full_or_first:
+        return "darling"
+    return full_or_first.strip().split()[0] or "darling"
+
+
+def step1_prompt(first_name: str | None = None) -> str:
+    name = _first_name(first_name)
+    return (
+        f"💰 *Well hello, {name}.*\n\n"
+        f"I'm Janai — your new expense admin. I'm very good at this. You hand me receipts, "
+        f"I handle everything else. Drafts, submissions, questions about what you spent — all mine.\n\n"
+        f"Setup's about 2 minutes. I'll walk you through it one step at a time, darling.\n\n"
+        f"*Step 1 of 3 — connect your AI*\n"
+        f"Send /login to hook up your Claude Pro/Max subscription (or paste an API key). "
+        f"That's what I use to read your receipts properly."
+    )
+
+
+# Kept for backward-compat with any other call site; prefer step1_prompt().
+STEP1_PROMPT = step1_prompt(None)
 
 STEP2_PROMPT = (
     "*Step 2 of 3 — install the Chrome extension*\n"
@@ -302,16 +317,22 @@ STEP3_PROMPT = (
     "That's it — I'll confirm once we're connected, love."
 )
 
-READY_PROMPT = (
-    "👋 You're all set up!\n\n"
-    "Send a receipt photo or PDF to file your first claim — add a caption like "
-    "_\"client lunch\"_ for context.\n\n"
-    "*Other things you can do:*\n"
-    "• /list — your recent claims\n"
-    "• /list approved — filter by status\n"
-    "• Ask questions: _\"how much did I spend in April?\"_\n"
-    "• Take action: _\"submit claim 126758\"_ · _\"delete the grab one\"_"
-)
+def ready_prompt(first_name: str | None = None) -> str:
+    name = _first_name(first_name)
+    return (
+        f"👋 *All set, {name}.*\n\n"
+        f"Send me a receipt — photo, PDF, whichever — and I'll file it for you, darling. "
+        f"Throw in a caption like _\"client lunch\"_ if you want me to get the context right.\n\n"
+        f"*Things you can ask me:*\n"
+        f"• /list — your recent claims\n"
+        f"• /list approved — filter by status\n"
+        f"• _\"how much did I spend in April?\"_\n"
+        f"• _\"submit claim 126758\"_ · _\"delete the grab one\"_\n\n"
+        f"Anything else you need, just say the word."
+    )
+
+
+READY_PROMPT = ready_prompt(None)
 
 
 def _web_next_step_html(user_db_id: int, u: dict | None) -> dict:
@@ -357,19 +378,19 @@ def _web_next_step_html(user_db_id: int, u: dict | None) -> dict:
     }
 
 
-def _next_step_prompt(user_db_id: int, u: dict | None) -> str:
+def _next_step_prompt(user_db_id: int, u: dict | None, first_name: str | None = None) -> str:
     """Return the single next-step message a user should see, based on what
     they've completed. Opinionated: one step at a time, no menu."""
     has_ai = bool(storage.get_anth_key(user_db_id))
     has_omnihr = bool(u and u.get("access_jwt"))
     if not has_ai:
-        return STEP1_PROMPT
+        return step1_prompt(first_name)
     if not has_omnihr:
         # Step 2 (install extension) and step 3 (pair) are shown together here
         # because step 2 has no signal we can detect — the user just reads and
         # installs. After they install, they'll already see step 3 beneath it.
         return STEP2_PROMPT + "\n\n" + STEP3_PROMPT
-    return READY_PROMPT
+    return ready_prompt(first_name)
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -378,7 +399,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
     u = storage.get_user(user_db_id)
     await update.message.reply_text(
-        _next_step_prompt(user_db_id, u),
+        _next_step_prompt(user_db_id, u, update.effective_user.first_name),
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -1131,11 +1152,13 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user_db_id = storage.upsert_user("telegram", str(msg.from_user.id))
         u = storage.get_user(user_db_id)
         await msg.reply_text(
-            _next_step_prompt(user_db_id, u),
+            _next_step_prompt(user_db_id, u, msg.from_user.first_name),
             parse_mode="Markdown",
             disable_web_page_preview=True,
         )
         return
+
+    storage.bump_last_inbound_at(u["id"])
 
     text = (msg.text or "").strip()
     if not text:
@@ -1225,11 +1248,13 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user_db_id = storage.upsert_user("telegram", str(msg.from_user.id))
         u = storage.get_user(user_db_id)
         await msg.reply_text(
-            _next_step_prompt(user_db_id, u),
+            _next_step_prompt(user_db_id, u, msg.from_user.first_name),
             parse_mode="Markdown",
             disable_web_page_preview=True,
         )
         return
+
+    storage.bump_last_inbound_at(u["id"])
 
     try:
         anth = await anthropic_for(u)
@@ -1728,7 +1753,7 @@ async function submitKey(){{
                     text=(
                         f"✅ *Step 3 of 3 done — paired as {me.get('full_name','?')} "
                         f"({tenant_id}, employee #{me.get('id')}).*\n\n"
-                        + READY_PROMPT
+                        + ready_prompt(me.get("full_name"))
                     ),
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
@@ -1804,6 +1829,7 @@ async def run() -> None:
         tg_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     )
     from ops.refresh_sweeper import run_forever as refresh_sweeper_forever
+    from ops.nudge_sweeper import run_forever as nudge_sweeper_forever
 
     async def notify_session_expired(user: dict, message: str) -> None:
         channel = user.get("channel")
@@ -1818,8 +1844,24 @@ async def run() -> None:
         else:
             log.info("session-expired notify skipped: channel=%s (no adapter)", channel)
 
+    async def notify_nudge(user: dict, message: str) -> None:
+        channel = user.get("channel")
+        chan_uid = user.get("channel_user_id")
+        if channel == "telegram" and chan_uid:
+            await tg_app.bot.send_message(
+                chat_id=int(chan_uid),
+                text=message,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+        else:
+            log.info("nudge skipped: channel=%s (no adapter)", channel)
+
     sweeper_task = asyncio.create_task(
         refresh_sweeper_forever(notifier=notify_session_expired)
+    )
+    nudge_task = asyncio.create_task(
+        nudge_sweeper_forever(notifier=notify_nudge)
     )
 
     try:
@@ -1830,6 +1872,7 @@ async def run() -> None:
         await tg_app.shutdown()
         polling_task.cancel()
         sweeper_task.cancel()
+        nudge_task.cancel()
 
 
 def main() -> None:
