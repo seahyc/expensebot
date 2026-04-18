@@ -95,31 +95,66 @@ async def run_agent(
     user_md: str = "",
     recent_claims: str = "",
     tool_executor,  # async callable(tool_name, tool_input) -> str
+    conversation_history: list[dict] | None = None,  # [{direction, body}] oldest first
 ) -> str:
     """Run the agent loop. Returns the final text response for the user.
 
     tool_executor is called for each tool_use Claude requests.
     It should return a string result (JSON or plain text).
     """
-    messages = [
-        {
+    # Build conversation history as prior turns (excluding the current message,
+    # which is already in conversation_history as the last 'in' entry)
+    history_messages: list[dict] = []
+    if conversation_history:
+        # Drop the last entry — it's the current message we're about to send
+        prior = conversation_history[:-1] if conversation_history else []
+        for entry in prior:
+            role = "user" if entry["direction"] == "in" else "assistant"
+            body = (entry["body"] or "")[:800]
+            if body:
+                history_messages.append({"role": role, "content": body})
+
+    context_block = {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"## Org config\n{tenant_md[:2000]}\n\n"
+                    f"## Your rules (learned from past corrections)\n"
+                    f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
+                    f"## Recent claims\n{recent_claims[:1500]}\n\n"
+                    f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
+                    f"## User message\n{user_message}"
+                ),
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+    }
+
+    # Anthropic requires strictly alternating roles. Merge consecutive same-role
+    # history entries, then append the context block (always user role).
+    merged: list[dict] = []
+    for m in history_messages:
+        if merged and merged[-1]["role"] == m["role"]:
+            merged[-1]["content"] += "\n" + m["content"]
+        else:
+            merged.append({"role": m["role"], "content": m["content"]})
+
+    # If history ends on a user turn, merge context into it to avoid two consecutive user msgs.
+    if merged and merged[-1]["role"] == "user":
+        # Append current message text to the last user turn's content
+        last_text = merged[-1]["content"]
+        context_text = context_block["content"][0]["text"]
+        merged[-1] = {
             "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        f"## Org config\n{tenant_md[:2000]}\n\n"
-                        f"## Your rules (learned from past corrections)\n"
-                        f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
-                        f"## Recent claims\n{recent_claims[:1500]}\n\n"
-                        f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
-                        f"## User message\n{user_message}"
-                    ),
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ],
+            "content": [{"type": "text", "text": last_text + "\n\n---\n\n" + context_text, "cache_control": {"type": "ephemeral"}}],
         }
-    ]
+        messages = merged
+    elif merged:
+        messages = merged + [context_block]
+    else:
+        messages = [context_block]
 
     # Agent loop — max 3 turns (tool calls)
     for turn in range(4):

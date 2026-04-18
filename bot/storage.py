@@ -635,6 +635,18 @@ def log_message(
         )
 
 
+def get_recent_messages(user_id: int, limit: int = 10) -> list[dict]:
+    """Return the last `limit` text messages for user, oldest first, for conversation history."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT direction, body FROM messages "
+            "WHERE user_id=? AND body IS NOT NULL AND body != '' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+    return [{"direction": r["direction"], "body": r["body"]} for r in reversed(rows)]
+
+
 def count_nudges_since(user_id: int, since: datetime, *, hook: str | None = None) -> int:
     """Count nudges sent to user since `since`. If `hook` is given, only that
     kind counts — used for per-hook spacing rules.

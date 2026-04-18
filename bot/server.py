@@ -1218,6 +1218,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     tenant_md = load_tenant_md(u.get("tenant_id"))
     user_md = load_user_md(u)
     executor = await _build_tool_executor(u)
+    history = storage.get_recent_messages(u["id"], limit=12)
 
     try:
         reply = await run_agent(
@@ -1228,6 +1229,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             user_md=user_md,
             recent_claims="(agent will fetch via tools if needed)",
             tool_executor=executor,
+            conversation_history=history,
         )
     except Exception as e:
         log.warning("agent failed: %s", e)
@@ -1418,6 +1420,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             user_note=user_note,
         )
         confirm_text, confirm_kb = _build_confirm_message(parsed, policies)
+        storage.log_message(u["id"], "out", confirm_text)
         await progress.edit_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
 
 
