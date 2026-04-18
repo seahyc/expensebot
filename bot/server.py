@@ -758,7 +758,7 @@ async def _do_file_draft(q: Any, chat_id: int, policy_id: int) -> None:
         return
 
     try:
-        await q.edit_message_text("⏳ Filing draft…")
+        await q.edit_message_text("On it… 💼")
     except Exception:
         pass
 
@@ -1178,7 +1178,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         oauth_code, oauth_state = hash_match.group(1), hash_match.group(2)
 
     if oauth_code and oauth_state and oauth_state in claude_oauth._pending:
-        progress = await msg.reply_text("⏳ Completing login…")
+        progress = await msg.reply_text("Just a moment, darling…")
         ok, err_msg, token_data = await claude_oauth.exchange_code(oauth_state, oauth_code)
         if ok and token_data:
             exp = None
@@ -1214,7 +1214,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "parse"):
         return
 
-    progress = await msg.reply_text("🤔")
+    progress = await msg.reply_text("Mmm, let me think… 💭")
     tenant_md = load_tenant_md(u.get("tenant_id"))
     user_md = load_user_md(u)
     executor = await _build_tool_executor(u)
@@ -1319,7 +1319,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not await _check_rate(update, u["id"], "parse"):
         return
-    progress = await msg.reply_text("⏳ Parsing receipt…")
+    progress = await msg.reply_text("Leave it with me… 👀")
 
     import hashlib
     sha = hashlib.sha256(file_bytes).hexdigest()
