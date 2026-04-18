@@ -4,7 +4,7 @@ You'll run the bot locally, install the extension unpacked, pair via the bot.
 
 ## 0. Telegram bot token
 
-Open https://t.me/BotFather → `/newbot` → name it (e.g. "ExpenseBot Dev") →
+Open https://t.me/BotFather → `/newbot` → name it (e.g. "Janai Dev") →
 get the token.
 
 ## 1. Backend running locally
@@ -33,7 +33,7 @@ Health check: `curl http://localhost:8000/healthz` → `{"status":"ok"}`
 1. Open `chrome://extensions` in Chrome.
 2. Toggle **Developer mode** (top-right).
 3. **Load unpacked** → select `~/Code/expensebot/extension/`.
-4. Pin the ExpenseBot icon to your toolbar (puzzle icon → pin).
+4. Pin the Janai icon to your toolbar (puzzle icon → pin).
 
 ## 3. Open omnihr.co and sign in
 
@@ -51,7 +51,7 @@ In Telegram, find your bot, send:
 
 Bot replies with a 6-digit code (e.g. `384192`).
 
-Click the ExpenseBot extension icon → popup shows "Signed in as Ying Cong (Glints)".
+Click the Janai extension icon → popup shows "Signed in as Ying Cong (Glints)".
 Paste the code → click **Pair**.
 
 Bot DMs back: `✅ Paired as Ying Cong (Glints, employee #59430)`.
@@ -90,7 +90,7 @@ Verify on https://glints.omnihr.co/expenses/submission/.
   reopen popup.
 - **Pair button does nothing** — backend isn't reachable. Check
   `curl http://localhost:8000/healthz`. Open extension service worker logs at
-  chrome://extensions → ExpenseBot → "Service worker" → console.
+  chrome://extensions → Janai → "Service worker" → console.
 - **Bot says "Not paired"** after pairing — JWTs landed in the DB but lookup
   failed. Check `sqlite3 expensebot.db "SELECT id, omnihr_full_name, omnihr_employee_id, length(access_jwt) FROM users;"`
 - **OmniHR 401** — JWT expired. Tokens are valid ~15 min for access, ~30 days

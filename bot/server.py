@@ -276,12 +276,12 @@ def load_skill(hrms: str = "omnihr") -> str:
 
 
 STEP1_PROMPT = (
-    "💰 *Welcome to ExpenseBot!*\n"
-    "I file OmniHR expense claims from Telegram. Setup takes ~2 minutes — "
+    "💰 *Hi darling — I'm Janai, your expense secretary.*\n"
+    "I'll file your OmniHR expense claims from Telegram. Setup takes about 2 minutes — "
     "I'll walk you through it one step at a time.\n\n"
     "*Step 1 of 3 — connect your AI*\n"
     "Send /login to connect your Claude Pro/Max subscription (or paste an API key). "
-    "This powers the AI that reads your receipts."
+    "That powers the AI I use to read your receipts."
 )
 
 STEP2_PROMPT = (
@@ -297,9 +297,9 @@ STEP3_PROMPT = (
     "`<your-company>.omnihr.co` (e.g. `glints.omnihr.co`). If your dashboard "
     "loads without a login prompt, you're already signed in.\n"
     "2. Send /pair here — I'll reply with a 6-digit code.\n"
-    "3. On that OmniHR tab, click the 💰 *ExpenseBot* icon in Chrome's toolbar "
+    "3. On that OmniHR tab, click the 💰 *Janai* icon in Chrome's toolbar "
     "(or the puzzle-piece menu if unpinned) → paste the code → tap *Pair*.\n\n"
-    "That's it — I'll confirm once we're connected."
+    "That's it — I'll confirm once we're connected, love."
 )
 
 READY_PROMPT = (
@@ -465,7 +465,7 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"in Chrome — it's at `<your-company>.omnihr.co` (e.g. `glints.omnihr.co`). "
         f"If your dashboard loads without a login prompt, you're good.\n\n"
         f"*Then:*\n"
-        f"1. On that OmniHR tab, click the 💰 ExpenseBot icon in Chrome's toolbar "
+        f"1. On that OmniHR tab, click the 💰 Janai icon in Chrome's toolbar "
         f"(or the puzzle-piece menu if it isn't pinned yet).\n"
         f"2. Paste the 6-digit code.\n"
         f"3. Tap *Pair*.\n\n"
@@ -1433,7 +1433,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
         page = f"""<!doctype html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ExpenseBot — Sign in</title>
+<title>Janai — Sign in</title>
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#eee;
@@ -1459,7 +1459,7 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
   .small{{font-size:11px;color:#555;text-align:center;margin-top:4px}}
 </style></head><body>
 <div class="c">
-  <h1>💰 ExpenseBot</h1>
+  <h1>💰 Janai</h1>
   <div class="sub">Connect your AI to parse receipts</div>
 
   <!-- Single combined view: open Claude in new tab, come back, paste here -->
@@ -1651,16 +1651,16 @@ async function submitKey(){{
         # non-technical user doesn't wonder which of two "extension" folders
         # to pick in Chrome's "Load unpacked" dialog.
         import zipfile, tempfile
-        zip_path = Path(tempfile.gettempdir()) / "ExpenseBot-Chrome-Extension.zip"
+        zip_path = Path(tempfile.gettempdir()) / "Janai-Chrome-Extension.zip"
         ext_dir = REPO_ROOT / "extension"
-        inner = "ExpenseBot-Chrome-Extension"
+        inner = "Janai-Chrome-Extension"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in ext_dir.rglob("*"):
                 if f.is_file() and not f.name.startswith("."):
                     zf.write(f, f"{inner}/{f.relative_to(ext_dir)}")
         return FileResponse(
             zip_path,
-            filename="ExpenseBot-Chrome-Extension.zip",
+            filename="Janai-Chrome-Extension.zip",
             media_type="application/zip",
         )
 

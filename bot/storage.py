@@ -202,7 +202,7 @@ def get_anth_oauth(user_id: int) -> tuple[str | None, str | None, datetime | Non
 #   - "Don't ask" section is the escape hatch for one-offs
 # Why this shape (vs free-form markdown): predictable slots for the agent to
 # append to, and human-skimmable when the user hits /memories.
-DEFAULT_MEMORY_TEMPLATE = """# ExpenseBot memory
+DEFAULT_MEMORY_TEMPLATE = """# Janai memory
 
 ## Classification rules
 _"When X, file as Y" patterns learned from your corrections._

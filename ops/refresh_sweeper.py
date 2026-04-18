@@ -41,7 +41,7 @@ EXPIRY_MESSAGE = (
     "`<your-company>.omnihr.co`, e.g. `glints.omnihr.co`). Google SSO is fine. "
     "Your browser session probably expired too.\n"
     "2. Send /pair here. I'll reply with a 6-digit code.\n"
-    "3. On that OmniHR tab, click the 💰 *ExpenseBot* icon in Chrome's toolbar "
+    "3. On that OmniHR tab, click the 💰 *Janai* icon in Chrome's toolbar "
     "(puzzle-piece menu if unpinned) → paste the code → tap *Pair*.\n\n"
     "Don't have the extension anymore? "
     "Reinstall: https://expensebot.seahyingcong.com/extension"

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "ExpenseBot",
+  "name": "Janai",
   "version": "0.0.1",
-  "description": "Bridges your OmniHR session to the ExpenseBot Telegram/Lark bot.",
+  "description": "Bridges your OmniHR session to Janai — your expense-claim secretary on Telegram/Lark.",
   "permissions": ["cookies", "storage", "activeTab"],
   "host_permissions": [
     "https://*.omnihr.co/*",

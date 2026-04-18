@@ -16,7 +16,7 @@ AUTH_START_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ExpenseBot — Sign in with Claude</title>
+<title>Janai — Sign in with Claude</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -47,7 +47,7 @@ AUTH_START_HTML = """<!doctype html>
 </head>
 <body>
 <div class="card" id="main">
-  <h1>🦐 ExpenseBot</h1>
+  <h1>💰 Janai</h1>
   <p>Sign in with your Claude subscription to parse receipts.</p>
 
   <div id="step1">
