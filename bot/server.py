@@ -1214,7 +1214,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "parse"):
         return
 
-    progress = await msg.reply_text("Mmm, let me think… 💭")
+    progress = await msg.reply_text("Give me a second, handsome… 😏")
     tenant_md = load_tenant_md(u.get("tenant_id"))
     user_md = load_user_md(u)
     executor = await _build_tool_executor(u)
