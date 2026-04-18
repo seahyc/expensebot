@@ -50,39 +50,66 @@ class ParsedReceipt:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-PARSE_TOOL = {
-    "name": "file_receipt",
-    "description": (
-        "Extract structured data from a receipt and classify it into the user's "
-        "OmniHR tenant policies. Be conservative with confidence."
-    ),
-    "input_schema": {
-        "type": "object",
-        "required": ["is_receipt", "confidence"],
-        "properties": {
-            "is_receipt": {"type": "boolean"},
-            "confidence": {
-                "type": "object",
-                "description": "0-1 confidence per field.",
-                "additionalProperties": {"type": "number"},
+def build_parse_tool(policies: list | None = None) -> dict:
+    """Build the file_receipt tool schema.
+
+    When `policies` is provided (list of PolicyEntry), injects a strict enum
+    of valid policy IDs so the model can't return null for is_receipt=true.
+    """
+    if policies:
+        ids = sorted({int(p.id) for p in policies})
+        desc_lines = [
+            f"{p.id}: {p.label}" + (f" ({p.category})" if p.category else "")
+            for p in sorted(policies, key=lambda x: x.id)
+        ]
+        policy_field: dict = {
+            "type": ["integer", "null"],
+            "enum": [*ids, None],
+            "description": (
+                "ID of the best-matching policy. When is_receipt=true you MUST pick "
+                "one of these IDs — do NOT return null.\n"
+                + "\n".join(desc_lines)
+            ),
+        }
+    else:
+        policy_field = {"type": ["integer", "null"]}
+
+    return {
+        "name": "file_receipt",
+        "description": (
+            "Extract structured data from a receipt and classify it into the user's "
+            "OmniHR tenant policies. Be conservative with confidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["is_receipt", "confidence"],
+            "properties": {
+                "is_receipt": {"type": "boolean"},
+                "confidence": {
+                    "type": "object",
+                    "description": "0-1 confidence per field.",
+                    "additionalProperties": {"type": "number"},
+                },
+                "merchant": {"type": ["string", "null"]},
+                "receipt_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                "amount": {"type": ["string", "null"], "description": "decimal string"},
+                "currency": {"type": ["string", "null"], "description": "ISO 4217"},
+                "suggested_policy_id": policy_field,
+                "suggested_sub_category_label": {"type": ["string", "null"]},
+                "custom_fields": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": "Keyed by custom-field label (case-insensitive).",
+                },
+                "description_draft": {"type": "string"},
+                "duplicate_likelihood": {"type": "string", "enum": ["low", "medium", "high"]},
+                "anomalies": {"type": "array", "items": {"type": "string"}},
             },
-            "merchant": {"type": ["string", "null"]},
-            "receipt_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
-            "amount": {"type": ["string", "null"], "description": "decimal string"},
-            "currency": {"type": ["string", "null"], "description": "ISO 4217"},
-            "suggested_policy_id": {"type": ["integer", "null"]},
-            "suggested_sub_category_label": {"type": ["string", "null"]},
-            "custom_fields": {
-                "type": "object",
-                "additionalProperties": True,
-                "description": "Keyed by custom-field label (case-insensitive).",
-            },
-            "description_draft": {"type": "string"},
-            "duplicate_likelihood": {"type": "string", "enum": ["low", "medium", "high"]},
-            "anomalies": {"type": "array", "items": {"type": "string"}},
         },
-    },
-}
+    }
+
+
+PARSE_TOOL = build_parse_tool()  # backwards-compat default (no enum)
 
 
 # Claude Code identity must be its OWN system block (not prepended to a
@@ -110,6 +137,7 @@ async def parse_receipt(
     user_md: str,
     recent_claims_summary: str,
     active_trip: str | None = None,
+    policies: list | None = None,  # list[PolicyEntry] — injects enum into tool schema
 ) -> ParsedReceipt:
     """Single inference. Cached prompt prefix (tenant.md + user.md + recent claims).
 
@@ -152,6 +180,7 @@ async def parse_receipt(
     last_err = None
     for attempt in range(4):
         try:
+            tool = build_parse_tool(policies)
             resp = await anthropic.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
@@ -159,7 +188,7 @@ async def parse_receipt(
                     {"type": "text", "text": CLAUDE_CODE_IDENTITY},
                     {"type": "text", "text": SYSTEM_PROMPT},
                 ],
-                tools=[PARSE_TOOL],
+                tools=[tool],
                 tool_choice={"type": "tool", "name": "file_receipt"},
                 messages=messages,
             )

@@ -56,12 +56,13 @@ from omnihr_client.client import (
     OmniHRClient,
 )
 from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationError
+from omnihr_client.policies import PolicyEntry, get_policies
 from omnihr_client.schema import invalidate_schema
 
 from . import access, claude_oauth, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
-from .common.parser import parse_receipt
+from .common.parser import ParsedReceipt, parse_receipt
 
 logging_setup.setup()
 log = logging.getLogger("expensebot")
@@ -71,6 +72,31 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000")
 
 REPO_ROOT = Path(__file__).parent.parent
 TENANTS_DIR = REPO_ROOT / "tenants"
+
+# ---------------------------------------------------------------------------
+# Pending file confirmation state (in-memory, one entry per Telegram chat)
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dc, field as _dcfield
+
+
+@_dc
+class _PendingFile:
+    tg_user_id: str
+    u: dict
+    file_bytes: bytes
+    media_type: str
+    filename: str
+    sha: str
+    tg_file_id: str
+    tg_file_type: str
+    parsed: ParsedReceipt
+    policies: list  # list[PolicyEntry]
+    user_note: str
+
+
+# keyed by Telegram chat_id (int)
+_pending_files: dict[int, _PendingFile] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +665,196 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _do_list(update, u, status_key, date_from, date_to)
 
 
+def _build_confirm_message(
+    parsed: ParsedReceipt, policies: list[PolicyEntry]
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the confirmation message and keyboard shown after parsing a receipt."""
+    lines = [
+        f"📄 *{parsed.merchant or 'Unknown merchant'}*",
+        f"{parsed.currency or '?'} {parsed.amount or '?'}  ·  {parsed.receipt_date or '?'}",
+    ]
+    low_conf = [
+        k for k in ("amount", "date", "merchant")
+        if parsed.confidence.get(k, 1.0) < 0.7
+    ]
+    if low_conf:
+        lines.append(f"⚠️ Low confidence on: {', '.join(low_conf)} — please double-check")
+    if parsed.suggested_sub_category_label:
+        lines.append(f"Category: {parsed.suggested_sub_category_label}")
+
+    text = "\n".join(lines)
+
+    if not parsed.suggested_policy_id:
+        if policies:
+            text += "\n\nI couldn't auto-classify. Pick a policy:"
+            rows: list[list[InlineKeyboardButton]] = []
+            row: list[InlineKeyboardButton] = []
+            for p in policies[:20]:
+                row.append(InlineKeyboardButton(p.label[:32], callback_data=f"pick_policy:{p.id}"))
+                if len(row) == 2:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_file")])
+        else:
+            text += "\n\nI couldn't auto-classify and no policies are available. Try adding a hint as a caption (e.g. 'travel local')."
+            rows = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_file")]]
+        return text, InlineKeyboardMarkup(rows)
+
+    policy_label = next(
+        (p.label for p in policies if p.id == parsed.suggested_policy_id),
+        f"policy #{parsed.suggested_policy_id}",
+    )
+    text += f"\nPolicy: *{policy_label}*\n\nFile this as a draft?"
+    return text, InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ File it", callback_data="confirm_file"),
+        InlineKeyboardButton("❌ Cancel", callback_data="cancel_file"),
+    ]])
+
+
+async def _do_file_draft(q: Any, chat_id: int, policy_id: int) -> None:
+    """Upload doc + create OmniHR draft for a confirmed pending receipt."""
+    pending = _pending_files.pop(chat_id, None)
+    if not pending:
+        await q.edit_message_text("No pending receipt — please resend the file.")
+        return
+
+    parsed = pending.parsed
+    u = pending.u
+
+    async def _fail(text: str, **kw) -> None:
+        try:
+            await q.edit_message_text(text, **kw)
+        except Exception:
+            await q._bot.send_message(chat_id=chat_id, text=text, **kw)
+
+    if not parsed.amount or not parsed.receipt_date:
+        await _fail(
+            f"Missing amount or date — couldn't parse those from the receipt.\n"
+            f"Parsed: {parsed.merchant} {parsed.amount} {parsed.currency} {parsed.receipt_date}"
+        )
+        return
+
+    try:
+        await q.edit_message_text("⏳ Filing draft…")
+    except Exception:
+        pass
+
+    try:
+        async with client_for(u) as client:
+            try:
+                doc = await client.upload_document(
+                    file_bytes=pending.file_bytes,
+                    name=pending.filename,
+                    media_type=pending.media_type if pending.media_type.startswith("application/") else "image/jpeg",
+                )
+                doc_id = doc["id"]
+                doc_path = doc["file_path"]
+            except Exception as e:
+                await _fail(f"Upload failed: {e}")
+                return
+
+            try:
+                schema = await client.schema(policy_id, parsed.receipt_date)
+            except Exception as e:
+                await _fail(f"Schema fetch failed: {e}")
+                return
+
+            values: dict[str, Any] = {
+                "AMOUNT": {"amount": str(parsed.amount), "amount_currency": parsed.currency or "SGD"},
+                "MERCHANT": parsed.merchant or "",
+                "RECEIPT_DATE": parsed.receipt_date.isoformat(),
+                "DESCRIPTION": parsed.description_draft or pending.user_note or "",
+            }
+            for lbl, val in (parsed.custom_fields or {}).items():
+                values[lbl] = val
+            if parsed.suggested_sub_category_label:
+                for f in schema.custom_fields():
+                    if f.field_type == "SINGLE_SELECT" and "sub" in f.label.lower():
+                        values[f.label] = parsed.suggested_sub_category_label
+                        break
+            for f in schema.custom_fields():
+                if f.is_mandatory and f.field_id not in {ff.field_id for ff in schema.custom_fields() if f.label in values}:
+                    label_low = f.label.lower()
+                    if ("trip start" in label_low or "trip end" in label_low) and f.label not in values:
+                        values[f.label] = parsed.receipt_date.isoformat()
+                    if "destination" in label_low and f.label not in values:
+                        values[f.label] = "Singapore"
+
+            receipts_payload = [{"id": doc_id, "file_path": doc_path}]
+            try:
+                draft = await client.create_draft(
+                    policy_id=policy_id,
+                    schema=schema,
+                    values=values,
+                    receipts=receipts_payload,
+                )
+            except SchemaDriftError as e:
+                await invalidate_schema(tenant_id=client.tenant_id, policy_id=policy_id)
+                labels = []
+                for err in (e.field_errors or []):
+                    fid = err.get("field_id")
+                    f = next((ff for ff in schema.custom_fields() if ff.field_id == fid), None)
+                    labels.append(f.label if f else f"#{fid}")
+                await _fail(
+                    f"📝 Couldn't file — this policy requires fields I couldn't guess:\n"
+                    + "".join(f"• *{lbl}*\n" for lbl in labels)
+                    + "\nReply with a caption like _'for client meeting, origin Tanjong Pagar, "
+                    "destination Raffles Place'_ and I'll retry, or fill them in on OmniHR directly.",
+                    parse_mode="Markdown",
+                )
+                return
+            except ValidationError as e:
+                await _fail(
+                    f"Couldn't file — {e}\n"
+                    f"Parsed: {parsed.merchant} {parsed.currency} {parsed.amount} on {parsed.receipt_date}\n"
+                    f"Values attempted: {list(values.keys())}"
+                )
+                return
+            except Exception as e:
+                await _fail(f"Draft create failed: {e}")
+                return
+
+        sub_id = draft["id"]
+        storage.insert_receipt(
+            u["id"],
+            file_sha256=pending.sha,
+            parsed=parsed.raw,
+            omnihr_doc_id=doc_id,
+            omnihr_submission_id=sub_id,
+            omnihr_file_path=doc_path,
+            omnihr_file_name=pending.filename,
+            omnihr_file_mime=pending.media_type,
+            tg_file_id=pending.tg_file_id,
+            tg_file_type=pending.tg_file_type,
+            status=draft.get("status", 3),
+        )
+        kb = _claim_buttons({"id": sub_id, "status": STATUS_DRAFT})
+        caption = (
+            f"✅ Drafted *#{sub_id}*\n"
+            f"{parsed.merchant} {parsed.currency} {parsed.amount} · {parsed.receipt_date}\n"
+            f"{parsed.suggested_sub_category_label or '?'}"
+        )
+        try:
+            await q.delete_message()
+        except Exception:
+            pass
+        import io
+        buf = io.BytesIO(pending.file_bytes)
+        buf.name = pending.filename
+        if pending.media_type.startswith("image/"):
+            await q._bot.send_photo(chat_id=chat_id, photo=buf, caption=caption, parse_mode="Markdown", reply_markup=kb)
+        else:
+            await q._bot.send_document(chat_id=chat_id, document=buf, filename=pending.filename, caption=caption, parse_mode="Markdown", reply_markup=kb)
+
+    except AuthError:
+        await _fail("Session expired — run /pair to re-link.")
+    except Exception as e:
+        log.exception("_do_file_draft failed")
+        await _fail(f"Filing failed: {e}")
+
+
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline-keyboard taps: submit:<id>, delete:<id>, confirm_delete:<id>."""
     q = update.callback_query
@@ -648,10 +864,40 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _gate(update):
         return
     u = storage.get_user_by_channel("telegram", str(q.from_user.id))
+    action, _, rest = q.data.partition(":")
+
+    # --- Receipt confirmation / policy-pick callbacks (no OmniHR auth guard needed for cancel) ---
+    if action == "cancel_file":
+        await q.answer()
+        chat_id = q.message.chat_id if q.message else q.from_user.id
+        _pending_files.pop(chat_id, None)
+        try:
+            await q.edit_message_text("Cancelled.")
+        except Exception:
+            pass
+        return
+
+    if action in ("confirm_file", "pick_policy"):
+        await q.answer()
+        chat_id = q.message.chat_id if q.message else q.from_user.id
+        if action == "confirm_file":
+            pending = _pending_files.get(chat_id)
+            if not pending or not pending.parsed.suggested_policy_id:
+                await q.edit_message_text("No pending receipt with a known policy.")
+                return
+            policy_id = pending.parsed.suggested_policy_id
+        else:
+            try:
+                policy_id = int(rest)
+            except ValueError:
+                await q.answer("Bad policy ID", show_alert=True)
+                return
+        await _do_file_draft(q, chat_id, policy_id)
+        return
+
     if not u or not u.get("access_jwt"):
         await q.answer("Not paired — run /pair", show_alert=True)
         return
-    action, _, rest = q.data.partition(":")
 
     # Handle list filter callbacks: list:approved, list:draft, etc.
     if action == "list":
@@ -1071,6 +1317,12 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             recent_summary = "(couldn't fetch recent claims)"
 
+        try:
+            policies: list[PolicyEntry] = await get_policies(client, u.get("tenant_id") or "")
+        except Exception as _pe:
+            log.warning("policies fetch failed: %s", _pe)
+            policies = []
+
         # Parse — try Agent SDK first (subscription auth), fall back to direct API
         parsed = None
         agent_raw = None
@@ -1102,6 +1354,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     user_md=user_md,
                     recent_claims_summary=recent_summary,
                     active_trip=None,
+                    policies=policies,
                 )
             except RuntimeError as e:
                 if "No Anthropic key" in str(e):
@@ -1119,140 +1372,23 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.edit_text("That doesn't look like a receipt — anything else?")
             return
 
-        await progress.edit_text(
-            f"📄 {parsed.merchant or '?'} {parsed.currency or '?'} {parsed.amount or '?'} on {parsed.receipt_date or '?'}\n"
-            f"Suggested: {parsed.suggested_sub_category_label or '?'} (policy {parsed.suggested_policy_id})\n"
-            f"⏳ Filing draft…"
-        )
-
-        # Upload PDF to OmniHR
-        try:
-            doc = await client.upload_document(
-                file_bytes=file_bytes,
-                name=filename,
-                media_type=media_type if media_type.startswith("application/") else "image/jpeg",
-            )
-            doc_id = doc["id"]
-            doc_path = doc["file_path"]
-        except Exception as e:
-            await progress.edit_text(f"Upload failed: {e}")
-            return
-
-        # Build values + create draft
-        if not parsed.suggested_policy_id or not parsed.amount or not parsed.receipt_date:
-            await progress.edit_text(
-                f"Couldn't auto-classify — add a hint like 'travel local' or 'subscription'.\n"
-                f"Parsed: {parsed.merchant} {parsed.amount} {parsed.currency} {parsed.receipt_date}"
-            )
-            return
-
-        try:
-            schema = await client.schema(parsed.suggested_policy_id, parsed.receipt_date)
-        except Exception as e:
-            await progress.edit_text(f"Schema fetch failed: {e}")
-            return
-
-        values: dict[str, Any] = {
-            "AMOUNT": {"amount": str(parsed.amount), "amount_currency": parsed.currency or "SGD"},
-            "MERCHANT": parsed.merchant or "",
-            "RECEIPT_DATE": parsed.receipt_date.isoformat(),
-            "DESCRIPTION": parsed.description_draft or user_note or "",
-        }
-
-        # Fill custom fields from parsed dict (label-keyed) + sub-category
-        for label, value in (parsed.custom_fields or {}).items():
-            values[label] = value
-        if parsed.suggested_sub_category_label:
-            for f in schema.custom_fields():
-                if f.field_type == "SINGLE_SELECT" and "sub" in f.label.lower():
-                    values[f.label] = parsed.suggested_sub_category_label
-                    break
-
-        # Default trip dates to receipt_date when not provided (common for local same-day trips)
-        for f in schema.custom_fields():
-            if f.is_mandatory and f.field_id not in {ff.field_id for ff in schema.custom_fields() if f.label in values}:
-                label_low = f.label.lower()
-                if "trip start" in label_low or "trip end" in label_low:
-                    if f.label not in values:
-                        values[f.label] = parsed.receipt_date.isoformat()
-                if "destination" in label_low and f.label not in values:
-                    values[f.label] = "Singapore"  # default for local trips
-
-        receipts_payload = [{"id": doc_id, "file_path": doc_path}]
-        try:
-            draft = await client.create_draft(
-                policy_id=parsed.suggested_policy_id,
-                schema=schema,
-                values=values,
-                receipts=receipts_payload,
-            )
-        except SchemaDriftError as e:
-            await invalidate_schema(tenant_id=client.tenant_id, policy_id=parsed.suggested_policy_id)
-            # Resolve field_ids in the error to human labels so the user
-            # sees "Origin, Destination, Purpose" not "1973, 1974, 1975".
-            labels = []
-            for err in (e.field_errors or []):
-                fid = err.get("field_id")
-                f = next((ff for ff in schema.custom_fields() if ff.field_id == fid), None)
-                labels.append(f.label if f else f"#{fid}")
-            await progress.edit_text(
-                f"📝 Couldn't file — this policy requires fields I couldn't guess:\n"
-                + "".join(f"• *{lbl}*\n" for lbl in labels)
-                + f"\nReply with a caption like _'for client meeting, origin Tanjong Pagar, "
-                f"destination Raffles Place'_ and I'll retry, or fill them in on OmniHR directly.",
-                parse_mode="Markdown",
-            )
-            return
-        except ValidationError as e:
-            # Show what we parsed + what's missing
-            parsed_summary = (
-                f"Parsed: {parsed.merchant} {parsed.currency} {parsed.amount} "
-                f"on {parsed.receipt_date}, policy {parsed.suggested_policy_id}\n"
-                f"Custom fields from Claude: {parsed.custom_fields}\n"
-                f"Sub-cat: {parsed.suggested_sub_category_label}\n"
-            )
-            await progress.edit_text(
-                f"Couldn't file — {e}\n\n{parsed_summary}\n"
-                f"Values attempted: {list(values.keys())}"
-            )
-            return
-        except Exception as e:
-            await progress.edit_text(f"Draft create failed: {e}")
-            return
-
-        sub_id = draft["id"]
-        storage.insert_receipt(
-            u["id"],
-            file_sha256=sha,
-            parsed=parsed.raw,
-            omnihr_doc_id=doc_id,
-            omnihr_submission_id=sub_id,
-            omnihr_file_path=doc_path,
-            omnihr_file_name=filename,
-            omnihr_file_mime=media_type,
+        # Store pending state and show confirmation / policy picker
+        chat_id = msg.chat_id
+        _pending_files[chat_id] = _PendingFile(
+            tg_user_id=str(msg.from_user.id),
+            u=u,
+            file_bytes=file_bytes,
+            media_type=media_type,
+            filename=filename,
+            sha=sha,
             tg_file_id=tg_file_id,
             tg_file_type=tg_file_type,
-            status=draft.get("status", 3),
+            parsed=parsed,
+            policies=policies,
+            user_note=user_note,
         )
-        kb = _claim_buttons({"id": sub_id, "status": STATUS_DRAFT})
-        caption = (
-            f"✅ Drafted *#{sub_id}*\n"
-            f"{parsed.merchant} {parsed.currency} {parsed.amount} · {parsed.receipt_date}\n"
-            f"{parsed.suggested_sub_category_label or '?'}"
-        )
-        # Replace the progress message with a preview-attached one
-        try:
-            await progress.delete()
-        except Exception:
-            pass
-        import io
-        buf = io.BytesIO(file_bytes)
-        buf.name = filename
-        if media_type.startswith("image/"):
-            await msg.reply_photo(photo=buf, caption=caption, parse_mode="Markdown", reply_markup=kb)
-        else:
-            # PDFs preview as a file card with the first page rendered by Telegram
-            await msg.reply_document(document=buf, caption=caption, parse_mode="Markdown", reply_markup=kb)
+        confirm_text, confirm_kb = _build_confirm_message(parsed, policies)
+        await progress.edit_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
 
 
 # ---------------------------------------------------------------------------
