@@ -1012,7 +1012,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         tg_file_type = "document"
     elif msg.photo:
         tg_file = await msg.photo[-1].get_file()
-        media_type = "image/jpeg"
+        media_type = "image/jpeg"  # default; corrected by magic-byte sniff below
         filename = "receipt.jpg"
         tg_file_id = msg.photo[-1].file_id
         tg_file_type = "photo"
@@ -1020,6 +1020,25 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     file_bytes = bytes(await tg_file.download_as_bytearray())
+
+    # Sniff actual format — Telegram's Bot API claims photos are JPEG, but
+    # messages arriving via a Matrix bridge (Beeper, etc.) can deliver PNGs
+    # through the same `msg.photo` path. Anthropic rejects the call with a
+    # 400 when the declared media_type doesn't match the bytes.
+    if file_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        media_type = "image/png"
+        if filename.endswith(".jpg") or filename.endswith(".jpeg"):
+            filename = "receipt.png"
+    elif file_bytes[:3] == b"\xff\xd8\xff":
+        media_type = "image/jpeg"
+    elif file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":
+        media_type = "image/webp"
+        if filename.endswith((".jpg", ".jpeg", ".png")):
+            filename = "receipt.webp"
+    elif file_bytes[:4] == b"%PDF":
+        media_type = "application/pdf"
+        if not filename.lower().endswith(".pdf"):
+            filename = "receipt.pdf"
     user_note = (msg.caption or "").strip()
 
     if not await _check_rate(update, u["id"], "parse"):
@@ -1169,7 +1188,20 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except SchemaDriftError as e:
             await invalidate_schema(tenant_id=client.tenant_id, policy_id=parsed.suggested_policy_id)
-            await progress.edit_text(f"Schema drift on policy {parsed.suggested_policy_id}: {e.field_errors}")
+            # Resolve field_ids in the error to human labels so the user
+            # sees "Origin, Destination, Purpose" not "1973, 1974, 1975".
+            labels = []
+            for err in (e.field_errors or []):
+                fid = err.get("field_id")
+                f = next((ff for ff in schema.custom_fields() if ff.field_id == fid), None)
+                labels.append(f.label if f else f"#{fid}")
+            await progress.edit_text(
+                f"📝 Couldn't file — this policy requires fields I couldn't guess:\n"
+                + "".join(f"• *{lbl}*\n" for lbl in labels)
+                + f"\nReply with a caption like _'for client meeting, origin Tanjong Pagar, "
+                f"destination Raffles Place'_ and I'll retry, or fill them in on OmniHR directly.",
+                parse_mode="Markdown",
+            )
             return
         except ValidationError as e:
             # Show what we parsed + what's missing
