@@ -50,39 +50,64 @@ class ParsedReceipt:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-PARSE_TOOL = {
-    "name": "file_receipt",
-    "description": (
-        "Extract structured data from a receipt and classify it into the user's "
-        "OmniHR tenant policies. Be conservative with confidence."
-    ),
-    "input_schema": {
-        "type": "object",
-        "required": ["is_receipt", "confidence"],
-        "properties": {
-            "is_receipt": {"type": "boolean"},
-            "confidence": {
-                "type": "object",
-                "description": "0-1 confidence per field.",
-                "additionalProperties": {"type": "number"},
+def build_parse_tool(policies: list | None = None) -> dict:
+    """Build the parse tool schema, optionally with a policy enum.
+
+    When `policies` is non-empty, `suggested_policy_id` is constrained to the
+    known valid IDs (plus null, for non-receipt images). This forces Haiku to
+    pick a concrete policy when is_receipt=true — it can't hedge with null
+    like it otherwise does.
+    """
+    policy_field: dict = {"type": ["integer", "null"]}
+    if policies:
+        ids = sorted({int(p.id) for p in policies})
+        policy_field = {
+            "type": ["integer", "null"],
+            "enum": [*ids, None],
+            "description": (
+                "ID of the best-matching policy. When is_receipt=true you "
+                "MUST pick one of the enum values — not null. Map the "
+                "receipt/caption to the closest policy; use the user's "
+                "caption and your tenant context to disambiguate."
+            ),
+        }
+    return {
+        "name": "file_receipt",
+        "description": (
+            "Extract structured data from a receipt and classify it into the "
+            "user's OmniHR tenant policies. Be conservative with confidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["is_receipt", "confidence"],
+            "properties": {
+                "is_receipt": {"type": "boolean"},
+                "confidence": {
+                    "type": "object",
+                    "description": "0-1 confidence per field.",
+                    "additionalProperties": {"type": "number"},
+                },
+                "merchant": {"type": ["string", "null"]},
+                "receipt_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+                "amount": {"type": ["string", "null"], "description": "decimal string"},
+                "currency": {"type": ["string", "null"], "description": "ISO 4217"},
+                "suggested_policy_id": policy_field,
+                "suggested_sub_category_label": {"type": ["string", "null"]},
+                "custom_fields": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": "Keyed by custom-field label (case-insensitive).",
+                },
+                "description_draft": {"type": "string"},
+                "duplicate_likelihood": {"type": "string", "enum": ["low", "medium", "high"]},
+                "anomalies": {"type": "array", "items": {"type": "string"}},
             },
-            "merchant": {"type": ["string", "null"]},
-            "receipt_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
-            "amount": {"type": ["string", "null"], "description": "decimal string"},
-            "currency": {"type": ["string", "null"], "description": "ISO 4217"},
-            "suggested_policy_id": {"type": ["integer", "null"]},
-            "suggested_sub_category_label": {"type": ["string", "null"]},
-            "custom_fields": {
-                "type": "object",
-                "additionalProperties": True,
-                "description": "Keyed by custom-field label (case-insensitive).",
-            },
-            "description_draft": {"type": "string"},
-            "duplicate_likelihood": {"type": "string", "enum": ["low", "medium", "high"]},
-            "anomalies": {"type": "array", "items": {"type": "string"}},
         },
-    },
-}
+    }
+
+
+# Kept for backwards-compat in tests / callers; dynamic version preferred.
+PARSE_TOOL = build_parse_tool()
 
 
 # Claude Code identity must be its OWN system block (not prepended to a
