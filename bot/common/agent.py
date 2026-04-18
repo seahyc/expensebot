@@ -47,6 +47,29 @@ RULES:
 - When listing claims, show: date, amount, merchant, status.
 - Claim IDs are numbers like #126758 — reference them so the user can act on them.
 
+PROFILE — who the user is (the "## About you" block):
+
+The "## About you" block in context is your always-loaded memory of this
+specific person — their name, pet names that landed, work/travel patterns,
+topics to avoid, inside jokes that worked. This is separate from
+classification rules.
+
+When to call update_profile:
+- You learn a durable fact about WHO they are ("I'm based in Singapore",
+  "I travel to Tokyo monthly for work", "call me darling not love")
+- A flirty line landed warmly enough that you want to reuse the pattern
+- They asked you to stop/avoid something personal
+
+When NOT to call:
+- Classification rules (use update_memories instead)
+- Temporary state ("I'm busy today")
+- Anything that doesn't generalize across future conversations
+
+Keep the profile under ~800 chars. Merge, don't append — rewrite the whole
+block with the new fact integrated. No user-confirmation required for
+profile updates (unlike update_memories), but be conservative — only write
+facts the user clearly asserted or strongly implied.
+
 MEMORY — how you learn from the user:
 
 The user's memory file ("## Janai memory" in context) has five fixed
@@ -86,6 +109,31 @@ Never write placeholder entries. Never invent memories without user consent
 in the same conversation."""
 
 
+def build_context_text(
+    *,
+    tenant_md: str,
+    user_md: str,
+    profile_md: str,
+    recent_claims: str,
+    has_file: bool,
+    user_message: str,
+) -> str:
+    about_block = (
+        f"## About you\n{profile_md}\n\n"
+        if profile_md.strip()
+        else "## About you\n(nothing yet — I'll fill this in as I learn)\n\n"
+    )
+    return (
+        f"## Org config\n{tenant_md[:2000]}\n\n"
+        f"{about_block}"
+        f"## Your rules (learned from past corrections)\n"
+        f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
+        f"## Recent claims\n{recent_claims[:1500]}\n\n"
+        f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
+        f"## User message\n{user_message}"
+    )
+
+
 async def run_agent(
     *,
     anthropic: AsyncAnthropic,
@@ -93,6 +141,7 @@ async def run_agent(
     has_file: bool = False,
     tenant_md: str = "",
     user_md: str = "",
+    profile_md: str = "",
     recent_claims: str = "",
     tool_executor,  # async callable(tool_name, tool_input) -> str
     conversation_history: list[dict] | None = None,  # [{direction, body}] oldest first
@@ -119,13 +168,13 @@ async def run_agent(
         "content": [
             {
                 "type": "text",
-                "text": (
-                    f"## Org config\n{tenant_md[:2000]}\n\n"
-                    f"## Your rules (learned from past corrections)\n"
-                    f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
-                    f"## Recent claims\n{recent_claims[:1500]}\n\n"
-                    f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
-                    f"## User message\n{user_message}"
+                "text": build_context_text(
+                    tenant_md=tenant_md,
+                    user_md=user_md,
+                    profile_md=profile_md,
+                    recent_claims=recent_claims,
+                    has_file=has_file,
+                    user_message=user_message,
                 ),
                 "cache_control": {"type": "ephemeral"},
             },

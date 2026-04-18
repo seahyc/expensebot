@@ -112,6 +112,7 @@ _ADD_COLS = [
     ("users", "anth_refresh_token", "TEXT"),   # encrypted; for Claude OAuth
     ("users", "anth_expires_at", "TEXT"),      # ISO UTC; for Claude OAuth
     ("users", "last_inbound_at", "TEXT"),      # ISO UTC; bumped on any inbound msg
+    ("users", "profile_md", "TEXT"),
 ]
 
 
@@ -127,8 +128,10 @@ def init_db(path: Path = DB_PATH) -> None:
 
 
 @contextmanager
-def db(path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(path)
+def db(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    # Resolve DB_PATH lazily (not as a default-arg value frozen at import)
+    # so tests can monkeypatch storage.DB_PATH to redirect writes.
+    conn = sqlite3.connect(path if path is not None else DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -266,6 +269,20 @@ def get_user_md_or_template(user_id: int) -> str:
     Used by the agent + /memories so the user always sees a structured file."""
     stored = get_user_md(user_id)
     return stored if stored.strip() else DEFAULT_MEMORY_TEMPLATE
+
+
+def get_profile_md(user_id: int) -> str:
+    """Return the always-in-context 'who is this user' markdown block.
+    Empty string for fresh users — the agent fills it as she learns."""
+    with db() as conn:
+        row = conn.execute("SELECT profile_md FROM users WHERE id=?", (user_id,)).fetchone()
+        return (row["profile_md"] if row else "") or ""
+
+
+def set_profile_md(user_id: int, markdown: str) -> None:
+    """Persist the core-memory profile block — called from update_profile tool."""
+    with db() as conn:
+        conn.execute("UPDATE users SET profile_md=? WHERE id=?", (markdown, user_id))
 
 
 def get_anth_key(user_id: int) -> str | None:

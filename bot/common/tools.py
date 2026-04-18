@@ -119,4 +119,30 @@ TOOLS = [
             "required": ["question"],
         },
     },
+    {
+        "name": "update_profile",
+        "description": (
+            "Rewrite your always-in-context memory of WHO this user is — name, "
+            "pet names they respond to, work/travel patterns, in-jokes that landed, "
+            "topics to avoid. This is NOT for classification rules (use update_memories "
+            "for those). Call when you learn a DURABLE fact about the person, not a one-off. "
+            "Takes the full replacement markdown — keep it under ~800 chars, bullet "
+            "points, no section headers needed. Merge new facts into the existing "
+            "block rather than appending blindly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "new_profile_md": {
+                    "type": "string",
+                    "description": "The full replacement profile markdown.",
+                },
+                "change_summary": {
+                    "type": "string",
+                    "description": "One short line, e.g. 'Added: travels Singapore-Tokyo weekly'.",
+                },
+            },
+            "required": ["new_profile_md", "change_summary"],
+        },
+    },
 ]

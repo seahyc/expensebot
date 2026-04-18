@@ -1117,6 +1117,15 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             log.info("memory updated for user=%s: %s", u["id"], change)
             return f"Saved. Summary: {change}"
 
+        elif tool_name == "update_profile":
+            new_profile = tool_input.get("new_profile_md", "")
+            change = tool_input.get("change_summary", "")
+            if len(new_profile) > 2000:
+                return "Refused: profile too long (>2000 chars). Trim before saving."
+            storage.set_profile_md(u["id"], new_profile)
+            log.info("profile updated for user=%s: %s", u["id"], change)
+            return f"Saved. Summary: {change}"
+
         elif tool_name == "get_claim_summary":
             async with client_for(u) as client:
                 data = await client.list_submissions(page_size=30)
@@ -1227,6 +1236,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             has_file=False,
             tenant_md=tenant_md,
             user_md=user_md,
+            profile_md=storage.get_profile_md(u["id"]),
             recent_claims="(agent will fetch via tools if needed)",
             tool_executor=executor,
             conversation_history=history,
