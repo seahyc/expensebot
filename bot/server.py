@@ -2489,7 +2489,13 @@ async function submitKey(){{
         elif service == "telegram":
             storage.remove_telegram_account(uid, account_id)
         elif service == "whatsapp":
+            # account_id is session_id — also clear the bridge session so re-add gets a fresh QR + history sync
             storage.remove_whatsapp_account(uid, account_id)
+            try:
+                async with httpx.AsyncClient() as _hc:
+                    await _hc.delete(f"{WHATSAPP_BRIDGE_URL}/session/{account_id}", timeout=5.0)
+            except Exception as _we:
+                log.warning("bridge session delete failed: %s", _we)
         else:
             raise HTTPException(status_code=400, detail="unknown service")
         return {"ok": True}
