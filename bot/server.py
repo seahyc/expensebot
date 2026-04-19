@@ -2582,8 +2582,12 @@ async def run() -> None:
         from telegram import BotCommand
         await tg_app.bot.set_my_commands([
             BotCommand("start", "Welcome & setup"),
+            BotCommand("setup", "Connection status & integrations"),
             BotCommand("login", "Connect your Claude AI"),
             BotCommand("pair", "Link your OmniHR account"),
+            BotCommand("connect_google", "Connect Gmail & Calendar"),
+            BotCommand("connect_telegram", "Read your Telegram messages"),
+            BotCommand("connect_whatsapp", "Read your WhatsApp messages"),
             BotCommand("list", "Show your recent claims"),
             BotCommand("memories", "What I remember about you"),
         ])
