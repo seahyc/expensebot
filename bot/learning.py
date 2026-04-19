@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime
 from types import ModuleType
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,8 @@ _REQUIRED_HEADERS = [
 
 _REVIEW_PROMPT_TEMPLATE = """\
 You are reviewing recent expense conversations to extract classification patterns worth persisting.
+
+Today's date: {today}
 
 Current memory:
 {current_user_md}
@@ -92,8 +95,6 @@ async def maybe_trigger_review(
     This function is non-blocking: if threshold is not reached it returns
     immediately. If threshold IS reached it spawns an asyncio task and returns.
     """
-    global _turn_counts
-
     if trigger == "submit":
         # Submit counter is DB-persisted; just check it
         count = db.get_submit_count(user_id)
@@ -139,7 +140,9 @@ async def run_review(
     try:
         current_user_md = db.get_user_md_or_template(user_id)
         formatted = _format_messages(recent_messages)
+        today = datetime.now().strftime("%Y-%m-%d")
         prompt = _REVIEW_PROMPT_TEMPLATE.format(
+            today=today,
             current_user_md=current_user_md,
             formatted_recent_messages=formatted,
         )

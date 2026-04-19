@@ -1265,9 +1265,10 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                 await client.submit_draft(cid)
                 await _record_merchant_after_submit(client, u, cid)
             storage.increment_submit_count(u["id"])
+            recent = storage.get_recent_messages(u["id"], limit=12)
             asyncio.create_task(learning.maybe_trigger_review(
                 user_id=u["id"], db=storage, anthropic_client=await anthropic_for(u),
-                recent_messages=[], trigger="submit",
+                recent_messages=recent, trigger="submit",
             ))
             return f"Submitted #{cid} for approval."
 
