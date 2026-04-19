@@ -438,7 +438,7 @@ def _setup_status_text(u: dict) -> str:
     if google_ok and tg_ok and wa_ok:
         lines.append("\n_All connected. I'll keep your profile updated automatically._")
     else:
-        lines.append(f"\n_Need the extension? [Install it here]({ext_url}) — takes 30 seconds._")
+        lines.append(f"\nNeed the extension? [Install it here]({ext_url}) — takes 30 seconds.")
     return "\n".join(lines)
 
 
@@ -574,7 +574,7 @@ async def cmd_connect_telegram(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         f"```\n{code}\n```\n"
         f"👆 Tap to copy.\n\n"
         f"Open the [Janai extension]({PUBLIC_BASE_URL}/extension) → Connections tab → paste this code → enter your phone number.\n\n"
-        f"_Don't have it? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds._\n\n"
+        f"Don't have it? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds.\n\n"
         f"_(Code valid for 5 minutes.)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
@@ -594,7 +594,7 @@ async def cmd_connect_whatsapp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         f"```\n{code}\n```\n"
         f"👆 Tap to copy.\n\n"
         f"Open the [Janai extension]({PUBLIC_BASE_URL}/extension) → Connections tab → paste this code → scan the QR with WhatsApp (Linked Devices → Link a Device).\n\n"
-        f"_Don't have it? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds._\n\n"
+        f"Don't have it? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds.\n\n"
         f"_(Code valid for 5 minutes.)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
@@ -2275,55 +2275,53 @@ async function submitKey(){{
     # Maps user_db_id -> E.164 phone string
     _tg_phones: dict[int, str] = {}
 
-    class TelegramInitPayload(BaseModel):
-        pairing_code: str
-        phone: str  # E.164
-
-    class TelegramVerifyPayload(BaseModel):
-        pairing_code: str
-        code: str  # OTP from Telegram
-
     @app.post("/extension/telegram-init")
-    async def extension_telegram_init(payload: TelegramInitPayload, request: Request) -> dict:
+    async def extension_telegram_init(p: dict[str, Any], request: Request) -> dict:
         client_ip = (request.client.host if request.client else "unknown") or "unknown"
         ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
         if not ok:
             raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
 
-        if not re.fullmatch(r"\d{6}", payload.pairing_code or ""):
+        pairing_code = p.get("pairing_code", "")
+        phone = p.get("phone", "")
+        if not re.fullmatch(r"\d{6}", pairing_code):
             raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+        if not phone:
+            raise HTTPException(status_code=400, detail="phone required")
 
         # Peek at pairing code without consuming — we need it again for verify
         with storage.db() as conn:
             row = conn.execute(
                 "SELECT user_id FROM pairing_codes WHERE code=? AND expires_at >= datetime('now')",
-                (payload.pairing_code,),
+                (pairing_code,),
             ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
         user_db_id = row["user_id"]
 
-        _tg_phones[user_db_id] = payload.phone
+        _tg_phones[user_db_id] = phone
 
         from .common.telegram_reader import start_phone_auth
         try:
-            await start_phone_auth(user_db_id, payload.phone)
+            await start_phone_auth(user_db_id, phone)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Telegram auth failed: {e}")
 
         return {"ok": True}
 
     @app.post("/extension/telegram-verify")
-    async def extension_telegram_verify(payload: TelegramVerifyPayload, request: Request) -> dict:
+    async def extension_telegram_verify(p: dict[str, Any], request: Request) -> dict:
         client_ip = (request.client.host if request.client else "unknown") or "unknown"
         ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
         if not ok:
             raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
 
-        if not re.fullmatch(r"\d{6}", payload.pairing_code or ""):
+        pairing_code = p.get("pairing_code", "")
+        code = p.get("code", "")
+        if not re.fullmatch(r"\d{6}", pairing_code):
             raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
 
-        user_db_id = storage.consume_pairing_code(payload.pairing_code)
+        user_db_id = storage.consume_pairing_code(pairing_code)
         if not user_db_id:
             raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
 
@@ -2332,7 +2330,7 @@ async function submitKey(){{
             raise HTTPException(status_code=400, detail="No pending Telegram auth — call /telegram-init first")
 
         try:
-            session_str = await verify_phone_code(user_db_id, payload.code)
+            session_str = await verify_phone_code(user_db_id, code)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Telegram verification failed: {e}")
 
@@ -2361,26 +2359,24 @@ async function submitKey(){{
     # WhatsApp bridge endpoints
     # -----------------------------------------------------------------------
 
-    class WhatsAppInitPayload(BaseModel):
-        pairing_code: str
-
     WHATSAPP_BRIDGE_URL = os.environ.get("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
 
     @app.post("/extension/whatsapp-init")
-    async def extension_whatsapp_init(payload: WhatsAppInitPayload, request: Request) -> dict:
+    async def extension_whatsapp_init(p: dict[str, Any], request: Request) -> dict:
         client_ip = (request.client.host if request.client else "unknown") or "unknown"
         ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
         if not ok:
             raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
 
-        if not re.fullmatch(r"\d{6}", payload.pairing_code or ""):
+        pairing_code = p.get("pairing_code", "")
+        if not re.fullmatch(r"\d{6}", pairing_code):
             raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
 
         # Peek without consuming — QR polling needs the pairing code still valid
         with storage.db() as conn:
             row = conn.execute(
                 "SELECT user_id FROM pairing_codes WHERE code=? AND expires_at >= datetime('now')",
-                (payload.pairing_code,),
+                (pairing_code,),
             ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
