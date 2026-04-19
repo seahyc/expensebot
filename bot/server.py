@@ -532,7 +532,7 @@ _STATUS_EMOJI = {
 }
 
 
-def _claim_summary(r: dict[str, Any], tenant_id: str | None = None) -> str:
+def _claim_summary(r: dict[str, Any], tenant_id: str | None = None, doc_id: int | None = None) -> str:
     status = r.get("status", 0)
     status_label = STATUS_LABELS.get(status, f"?{status}")
     emoji = _STATUS_EMOJI.get(status, "📄")
@@ -540,8 +540,8 @@ def _claim_summary(r: dict[str, Any], tenant_id: str | None = None) -> str:
     merchant = r.get("merchant") or ""
     desc = (r.get("description") or "")[:80]
     preview = ""
-    if tenant_id and tenant_id != "unknown":
-        preview = f"\nhttps://{tenant_id}.omnihr.co/document/preview/expense/{r['id']}/"
+    if tenant_id and tenant_id != "unknown" and doc_id:
+        preview = f"\nhttps://{tenant_id}.omnihr.co/document/preview/expense/{doc_id}/"
     return (
         f"{emoji} *{status_label}* · #{r['id']}\n"
         f"{r.get('receipt_date','?')} · {r.get('amount_currency','?')} {r.get('amount','?')}\n"
@@ -686,9 +686,10 @@ async def _do_list(
         reply_markup=filter_kb,
     )
     for r in rows[:10]:  # cap at 10 cards to avoid spam
-        caption = _claim_summary(r, tenant_id=u.get("tenant_id"))
-        kb = _claim_buttons(r)
         local = storage.find_receipt_by_submission(u["id"], r["id"])
+        doc_id = local.get("omnihr_doc_id") if local else None
+        caption = _claim_summary(r, tenant_id=u.get("tenant_id"), doc_id=doc_id)
+        kb = _claim_buttons(r)
         if local and local.get("tg_file_id"):
             try:
                 fid = local["tg_file_id"]
