@@ -1809,6 +1809,8 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _gate(update):
         return
     msg = update.message
+    if not msg or not msg.from_user:
+        return  # forwarded from channel with no sender info
     u = storage.get_user_by_channel("telegram", str(msg.from_user.id))
     if not u:
         # First-ever message — kick straight into the guided flow.
