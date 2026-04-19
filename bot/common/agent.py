@@ -27,6 +27,47 @@ _PLUGIN_TOOLS = load_enabled_tools()
 TOOLS = _BASE_TOOLS + _PLUGIN_TOOLS
 
 log = logging.getLogger(__name__)
+_tel = logging.getLogger("janai.llm")  # structured LLM telemetry — set to DEBUG to see full payloads
+
+
+def _log_llm_input(user_id: Any, turn: int, system_prompt: str, messages: list) -> None:
+    if not _tel.isEnabledFor(logging.DEBUG):
+        # Always log a compact summary at INFO
+        last_user = next(
+            (m for m in reversed(messages) if m.get("role") == "user"), None
+        )
+        preview = ""
+        if last_user:
+            c = last_user.get("content", "")
+            preview = (c[:200] if isinstance(c, str) else str(c)[:200])
+        _tel.info("llm_input user=%s turn=%d msgs=%d preview=%s", user_id, turn, len(messages), preview)
+        return
+    _tel.debug(
+        "llm_input user=%s turn=%d system=%s messages=%s",
+        user_id, turn,
+        system_prompt[:500],
+        json.dumps(messages, default=str)[:2000],
+    )
+
+
+def _log_llm_output(user_id: Any, turn: int, resp: Any) -> None:
+    text = " ".join(
+        b.text for b in resp.content if getattr(b, "type", "") == "text"
+    )
+    tools = [
+        {"tool": b.name, "input": b.input}
+        for b in resp.content if getattr(b, "type", "") == "tool_use"
+    ]
+    usage = getattr(resp, "usage", None)
+    _tel.info(
+        "llm_output user=%s turn=%d stop=%s in_tok=%s out_tok=%s tools=%s text=%s",
+        user_id, turn, resp.stop_reason,
+        getattr(usage, "input_tokens", "?"),
+        getattr(usage, "output_tokens", "?"),
+        json.dumps(tools, default=str)[:300],
+        text[:300],
+    )
+
 
 # The "You are Claude Code..." opener must sit in its OWN system-block when
 # a Claude-subscription OAuth token (sk-ant-oat...) is in play — Anthropic's
@@ -62,8 +103,22 @@ def render_merchants_block(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def build_integrations_block(user: dict[str, Any]) -> str:
+    lines = []
+    lines.append(f"- Gmail: {'✅ Connected' if user.get('google_access_token') else '⬜ Not connected'}")
+    lines.append(f"- Google Calendar: {'✅ Connected' if user.get('google_access_token') else '⬜ Not connected'}")
+    lines.append(
+        f"- Telegram messages: {'✅ Connected (' + (user.get('telegram_phone') or '') + ')' if user.get('telegram_session') else '⬜ Not connected — /connect_telegram to set up'}"
+    )
+    lines.append(
+        f"- WhatsApp messages: {'✅ Connected (' + (user.get('whatsapp_phone') or '') + ')' if user.get('whatsapp_connected') else '⬜ Not connected — /connect_whatsapp to set up'}"
+    )
+    return "## Integrations\n" + "\n".join(lines) + "\n\n"
+
+
 def build_context_text(
     *,
+    user: dict[str, Any],
     user_md: str,
     profile_md: str,
     boss_profile_md: str = "",
@@ -87,8 +142,10 @@ def build_context_text(
         if triangulation_md
         else ""
     )
+    integrations_block = build_integrations_block(user) if user else ""
     return (
         f"## Now\n{_now_sgt()}\n\n"
+        f"{integrations_block}"
         f"{boss_block}"
         f"{about_block}"
         f"## Your rules (learned from past corrections)\n"
@@ -139,6 +196,7 @@ async def run_agent(
             {
                 "type": "text",
                 "text": build_context_text(
+                    user=user or {},
                     user_md=user_md,
                     profile_md=profile_md,
                     boss_profile_md=boss_profile_md,
@@ -174,8 +232,13 @@ async def run_agent(
     else:
         messages = [context_block]
 
+    user_id = (user or {}).get("id", "?")
+
     # Agent loop — max 3 turns (tool calls)
     for turn in range(4):
+        # Telemetry: log what we're sending
+        _log_llm_input(user_id, turn, final_system_prompt, messages)
+
         try:
             resp = await anthropic.messages.create(
                 model="claude-sonnet-4-6",
@@ -199,6 +262,9 @@ async def run_agent(
                 )
             return f"Sorry, I hit an error: {e}"
 
+        # Telemetry: log what we got back
+        _log_llm_output(user_id, turn, resp)
+
         # Collect text + tool_use blocks
         text_parts = []
         tool_calls = []
@@ -217,11 +283,12 @@ async def run_agent(
 
         tool_results = []
         for tc in tool_calls:
-            log.info("tool call: %s(%s)", tc.name, json.dumps(tc.input)[:100])
+            log.info("tool_call user=%s turn=%d tool=%s input=%s", user_id, turn, tc.name, json.dumps(tc.input)[:200])
             try:
                 result = await tool_executor(tc.name, tc.input)
             except Exception as e:
                 result = f"Error: {e}"
+            log.debug("tool_result user=%s tool=%s result=%s", user_id, tc.name, str(result)[:500])
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tc.id,
