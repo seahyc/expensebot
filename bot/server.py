@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -31,7 +32,7 @@ from typing import Any
 
 import httpx
 from anthropic import AsyncAnthropic
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -74,6 +75,20 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000")
 REPO_ROOT = Path(__file__).parent.parent
 TENANTS_DIR = REPO_ROOT / "tenants"
 
+# Tenant ids become filenames on disk. Restrict to a simple slug charset to
+# prevent path traversal (../../etc/foo) and any filesystem-special chars.
+_SAFE_TENANT_RE = re.compile(r"[^a-z0-9_-]+")
+MAX_RECEIPT_BYTES = int(os.environ.get("MAX_RECEIPT_BYTES", 10 * 1024 * 1024))  # 10 MB default
+
+
+def sanitize_tenant_id(raw: str | None) -> str:
+    """Reduce a free-form org label to a safe on-disk tenant slug."""
+    if not raw:
+        return "unknown"
+    slug = _SAFE_TENANT_RE.sub("", raw.lower())
+    return slug or "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Pending file confirmation state (in-memory, one entry per Telegram chat)
 # ---------------------------------------------------------------------------
@@ -107,9 +122,19 @@ _pending_files: dict[int, _PendingFile] = {}
 def load_tenant_md(tenant_id: str | None) -> str:
     if not tenant_id:
         return ""
-    path = TENANTS_DIR / f"{tenant_id}.md"
-    if path.exists():
-        return path.read_text()
+    # Defense-in-depth: even if a malformed tenant_id got into the DB (old
+    # row, migration, etc.), never let it escape TENANTS_DIR.
+    safe = sanitize_tenant_id(tenant_id)
+    if safe == "unknown":
+        return ""
+    path = TENANTS_DIR / f"{safe}.md"
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(TENANTS_DIR.resolve())
+    except (ValueError, OSError):
+        return ""
+    if resolved.exists():
+        return resolved.read_text()
     return ""
 
 
@@ -1337,23 +1362,44 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Download file
+    # Download file. Check Telegram's reported size BEFORE downloading so a
+    # malicious user can't force us to pull a 20 MB file and blow the worker's
+    # memory.
     if msg.document:
+        if msg.document.file_size and msg.document.file_size > MAX_RECEIPT_BYTES:
+            await msg.reply_text(
+                f"File too large ({msg.document.file_size} bytes). "
+                f"Max is {MAX_RECEIPT_BYTES} bytes."
+            )
+            return
         tg_file = await msg.document.get_file()
         media_type = msg.document.mime_type or "application/pdf"
         filename = msg.document.file_name or "receipt.pdf"
         tg_file_id = msg.document.file_id
         tg_file_type = "document"
     elif msg.photo:
-        tg_file = await msg.photo[-1].get_file()
+        photo = msg.photo[-1]
+        if photo.file_size and photo.file_size > MAX_RECEIPT_BYTES:
+            await msg.reply_text(
+                f"Photo too large ({photo.file_size} bytes). "
+                f"Max is {MAX_RECEIPT_BYTES} bytes."
+            )
+            return
+        tg_file = await photo.get_file()
         media_type = "image/jpeg"  # default; corrected by magic-byte sniff below
         filename = "receipt.jpg"
-        tg_file_id = msg.photo[-1].file_id
+        tg_file_id = photo.file_id
         tg_file_type = "photo"
     else:
         return
 
     file_bytes = bytes(await tg_file.download_as_bytearray())
+    # Final guard in case the Telegram-reported size was missing / lied.
+    if len(file_bytes) > MAX_RECEIPT_BYTES:
+        await msg.reply_text(
+            f"File too large ({len(file_bytes)} bytes). Max is {MAX_RECEIPT_BYTES} bytes."
+        )
+        return
 
     # Sniff actual format — Telegram's Bot API claims photos are JPEG, but
     # messages arriving via a Matrix bridge (Beeper, etc.) can deliver PNGs
@@ -1496,13 +1542,27 @@ class PairPayload(BaseModel):
 def make_app(tg_app: Application | None = None) -> FastAPI:
     app = FastAPI(title="expensebot")
 
-    # Allow the extension (any localhost or our public host) to POST
+    # Restrict CORS to (a) our public host, (b) localhost for dev, and
+    # (c) chrome-extension origins (32-char ids, a–p only per Chrome's
+    # encoding). The prior `allow_origins=["*"]` let any site on the web
+    # POST to /extension/pair.
     from fastapi.middleware.cors import CORSMiddleware
+    allowed_origins: list[str] = []
+    if PUBLIC_BASE_URL:
+        allowed_origins.append(PUBLIC_BASE_URL.rstrip("/"))
+    allowed_origins += [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+    extra = os.environ.get("EXTRA_CORS_ORIGINS", "").strip()
+    if extra:
+        allowed_origins.extend(o.strip() for o in extra.split(",") if o.strip())
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=list(dict.fromkeys(allowed_origins)),
+        allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
 
     from fastapi.responses import HTMLResponse, Response
@@ -1763,7 +1823,24 @@ async function submitKey(){{
         return pages.privacy_page()
 
     @app.post("/extension/pair")
-    async def extension_pair(p: PairPayload) -> dict:
+    async def extension_pair(p: PairPayload, request: Request) -> dict:
+        # Rate-limit by client IP. The pairing code space is only 1M combos;
+        # without a per-IP cap an attacker can brute-force codes against the
+        # 5-min TTL window. This is independent of the telegram-side /pair
+        # per-user rate limit.
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
+        if not ok:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many pairing attempts, try again later.",
+                headers={"Retry-After": str(retry)},
+            )
+
+        # Validate pairing code shape before hitting the DB.
+        if not re.fullmatch(r"\d{6}", p.pairing_code or ""):
+            raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+
         user_db_id = storage.consume_pairing_code(p.pairing_code)
         if not user_db_id:
             raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
@@ -1785,9 +1862,12 @@ async function submitKey(){{
                 raise HTTPException(status_code=400, detail=f"OmniHR /auth/details/ → {r.status_code}")
             me = r.json()
 
-        # Derive tenant id from org (subdomain best, but use org name as fallback)
+        # Derive tenant id from org (subdomain best, but use org name as fallback).
+        # Run through sanitize_tenant_id so the resulting slug is safe to use as
+        # a filename in TENANTS_DIR (no path traversal via crafted org names).
         org_name = (p.org or {}).get("name") or me.get("org", {}).get("name") or ""
-        tenant_id = org_name.lower().split()[0] if org_name else "unknown"
+        first_token = org_name.lower().split()[0] if org_name else ""
+        tenant_id = sanitize_tenant_id(first_token)
 
         # Enforce email-domain allowlist
         user_email_raw = me.get("primary_email")
@@ -1864,7 +1944,14 @@ async def run() -> None:
 
     import uvicorn
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+        log_level="info",
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
     server = uvicorn.Server(config)
 
     # Run uvicorn + telegram polling + refresh sweeper in parallel
