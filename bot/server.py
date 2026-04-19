@@ -507,18 +507,22 @@ _STATUS_EMOJI = {
 }
 
 
-def _claim_summary(r: dict[str, Any]) -> str:
+def _claim_summary(r: dict[str, Any], tenant_id: str | None = None) -> str:
     status = r.get("status", 0)
     status_label = STATUS_LABELS.get(status, f"?{status}")
     emoji = _STATUS_EMOJI.get(status, "📄")
     policy = (r.get("policy") or {}).get("name") or "?"
     merchant = r.get("merchant") or ""
     desc = (r.get("description") or "")[:80]
+    preview = ""
+    if tenant_id and tenant_id != "unknown":
+        preview = f"\nhttps://{tenant_id}.omnihr.co/document/preview/expense/{r['id']}/"
     return (
         f"{emoji} *{status_label}* · #{r['id']}\n"
         f"{r.get('receipt_date','?')} · {r.get('amount_currency','?')} {r.get('amount','?')}\n"
         f"{merchant} — {policy}\n"
         f"_{desc}_"
+        f"{preview}"
     )
 
 
@@ -657,7 +661,7 @@ async def _do_list(
         reply_markup=filter_kb,
     )
     for r in rows[:10]:  # cap at 10 cards to avoid spam
-        caption = _claim_summary(r)
+        caption = _claim_summary(r, tenant_id=u.get("tenant_id"))
         kb = _claim_buttons(r)
         local = storage.find_receipt_by_submission(u["id"], r["id"])
         if local and local.get("tg_file_id"):
@@ -670,7 +674,7 @@ async def _do_list(
                 continue
             except Exception as e:
                 log.warning("tg_file_id replay failed for %s: %s", r["id"], e)
-        await target.reply_text(caption, parse_mode="Markdown", reply_markup=kb)
+        await target.reply_text(caption, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
