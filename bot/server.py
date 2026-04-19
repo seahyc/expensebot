@@ -62,6 +62,7 @@ from omnihr_client.schema import invalidate_schema
 
 from . import access, claude_oauth, learning, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
+from .plugins.registry import load_enabled_skills, load_enabled_tools
 from .common.agent_parser import parse_receipt_via_agent
 from .common import context_lookup
 from .common.context_lookup import triangulate
@@ -322,6 +323,11 @@ async def _gate(update: Update) -> bool:
 
 SYSTEM_PROMPT_MD = (REPO_ROOT / "bot" / "system_prompt.md").read_text()
 SKILLS_DIR = REPO_ROOT / "bot" / "skills"
+
+# Load plugin skills and tools at startup — all disabled by default.
+# To enable a plugin, set "enabled": True in bot/plugins/registry.py PLUGINS.
+_PLUGIN_SKILLS = load_enabled_skills()
+_PLUGIN_TOOLS = load_enabled_tools()
 
 
 def load_skill(hrms: str = "omnihr") -> str:

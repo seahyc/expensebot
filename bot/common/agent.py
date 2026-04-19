@@ -17,7 +17,8 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 
-from .tools import TOOLS
+from .tools import TOOLS as _BASE_TOOLS
+from ..plugins.registry import load_enabled_skills, load_enabled_tools
 
 # Load expense policy once at module level — missing file is non-fatal.
 try:
@@ -26,6 +27,11 @@ try:
     ).read_text()
 except Exception:
     _POLICY_MD = ""
+
+# Load plugin skills and tools at startup — all disabled by default.
+_PLUGIN_SKILLS = load_enabled_skills()
+_PLUGIN_TOOLS = load_enabled_tools()
+TOOLS = _BASE_TOOLS + _PLUGIN_TOOLS
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +139,9 @@ or delete that line; still call update_memories with the full new markdown.
 Never write placeholder entries. Never invent memories without user consent
 in the same conversation."""
 
+# Append plugin skill instructions to SYSTEM if any plugins are enabled.
+if _PLUGIN_SKILLS:
+    SYSTEM = SYSTEM + "\n\n" + _PLUGIN_SKILLS
 
 CONFIDENT_THRESHOLD = 3
 
