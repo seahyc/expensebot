@@ -348,6 +348,31 @@ app.post("/session/:session_id", async (req, res) => {
   }
 });
 
+// POST /session/:session_id/reset — tear down existing session, clear auth, start fresh (for re-pairing)
+app.post("/session/:session_id/reset", async (req, res) => {
+  const { session_id } = req.params;
+  log.info({ session_id }, "resetting session for re-pair");
+
+  const state = sessions.get(session_id);
+  if (state?.socket) {
+    try { await state.socket.logout(); } catch (_) {}
+    try { state.socket.end(); } catch (_) {}
+  }
+  clearAuthState(session_id);
+  sessions.delete(session_id);
+
+  // Small delay so socket close events settle before we start fresh
+  await new Promise((r) => setTimeout(r, 500));
+
+  try {
+    await startSession(session_id);
+    res.json({ ok: true });
+  } catch (e) {
+    log.error({ session_id, err: e.message }, "startSession after reset failed");
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /qr/:session_id — return QR code or connected status
 app.get("/qr/:session_id", (req, res) => {
   const { session_id } = req.params;
