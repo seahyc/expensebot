@@ -666,6 +666,10 @@ def _parse_list_args(args: list[str]) -> tuple[str, str | None, str | None]:
     return status_key, date_from, date_to
 
 
+_LIST_PAGE_SIZE = 10   # cards shown per Load more tap
+_LIST_FETCH_SIZE = 50  # max fetched from OmniHR in one call
+
+
 async def _do_list(
     update: Update,
     u: dict,
@@ -674,13 +678,14 @@ async def _do_list(
     date_to: str | None = None,
     *,
     is_callback: bool = False,
+    offset: int = 0,
 ) -> None:
-    """Shared list logic for both /list command and inline filter callbacks."""
+    """Shared list logic for /list command, filter callbacks, and Load more."""
     filters = FILTER_SHORTCUTS.get(status_key, ACTIVE_STATUS_FILTERS)
 
     async with client_for(u) as client:
         try:
-            data = await client.list_submissions(status_filters=filters, page_size=20)
+            data = await client.list_submissions(status_filters=filters, page_size=_LIST_FETCH_SIZE)
         except AuthError:
             msg = "Session expired — run /pair to re-link."
             if is_callback:
@@ -693,18 +698,13 @@ async def _do_list(
 
     # Client-side date filter
     if date_from or date_to:
-        filtered = []
-        for r in rows:
-            rd = r.get("receipt_date", "")
-            if date_from and rd < date_from:
-                continue
-            if date_to and rd > date_to:
-                continue
-            filtered.append(r)
-        rows = filtered
+        rows = [
+            r for r in rows
+            if (not date_from or r.get("receipt_date", "") >= date_from)
+            and (not date_to or r.get("receipt_date", "") <= date_to)
+        ]
 
     target = update.callback_query.message if is_callback else update.message
-    filter_kb = _list_filter_keyboard(status_key)
 
     date_label = ""
     if date_from and date_to:
@@ -712,21 +712,26 @@ async def _do_list(
     elif date_from:
         date_label = f" (from {date_from})"
 
-    if not rows:
+    total = len(rows)
+
+    # Send header only on first load (offset == 0)
+    if offset == 0:
+        filter_kb = _list_filter_keyboard(status_key)
+        if not rows:
+            await target.reply_text(
+                f"No *{status_key}*{date_label} claims found.",
+                parse_mode="Markdown",
+                reply_markup=filter_kb,
+            )
+            return
         await target.reply_text(
-            f"No *{status_key}*{date_label} claims found.",
+            f"_{status_key}{date_label}: {total} claim{'s' if total != 1 else ''}_",
             parse_mode="Markdown",
             reply_markup=filter_kb,
         )
-        return
 
-    total = len(rows)
-    await target.reply_text(
-        f"_{status_key}{date_label}: {total} claim{'s' if total != 1 else ''}_",
-        parse_mode="Markdown",
-        reply_markup=filter_kb,
-    )
-    for r in rows[:10]:  # cap at 10 cards to avoid spam
+    page_rows = rows[offset:offset + _LIST_PAGE_SIZE]
+    for r in page_rows:
         local = storage.find_receipt_by_submission(u["id"], r["id"])
         doc_id = local.get("omnihr_doc_id") if local else None
         caption = _claim_summary(r, tenant_id=u.get("tenant_id"), doc_id=doc_id)
@@ -742,6 +747,21 @@ async def _do_list(
             except Exception as e:
                 log.warning("tg_file_id replay failed for %s: %s", r["id"], e)
         await target.reply_text(caption, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+
+    # "Load more" button if there are more results
+    next_offset = offset + _LIST_PAGE_SIZE
+    if next_offset < total:
+        remaining = total - next_offset
+        df = date_from or ""
+        dt = date_to or ""
+        more_cb = f"listmore:{status_key}:{next_offset}:{df}:{dt}"
+        await target.reply_text(
+            f"_{remaining} more_ — tap to load",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(f"Load more ({remaining})", callback_data=more_cb)
+            ]]),
+        )
 
 
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1073,6 +1093,17 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer()
         status_key = rest or "all"
         await _do_list(update, u, status_key, is_callback=True)
+        return
+
+    # Load more: listmore:{status_key}:{offset}:{date_from}:{date_to}
+    if action == "listmore":
+        await q.answer()
+        parts = (rest or "").split(":", 3)
+        sk = parts[0] if parts else "all"
+        off = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        df = parts[2] if len(parts) > 2 and parts[2] else None
+        dt = parts[3] if len(parts) > 3 and parts[3] else None
+        await _do_list(update, u, sk, df, dt, is_callback=True, offset=off)
         return
 
     try:
