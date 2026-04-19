@@ -113,6 +113,35 @@ CREATE TABLE IF NOT EXISTS merchant_choices (
   UNIQUE(user_id, merchant_normalized, policy_id, sub_category)
 );
 CREATE INDEX IF NOT EXISTS merchant_choices_user ON merchant_choices(user_id, count DESC);
+
+CREATE TABLE IF NOT EXISTS google_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    access_token TEXT,
+    refresh_token TEXT,
+    token_expiry TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS telegram_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    phone TEXT NOT NULL,
+    session_str TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, phone)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    phone TEXT,
+    session_id TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, session_id)
+);
 """
 
 
@@ -941,3 +970,159 @@ def get_user_by_ext_session(token: str) -> dict | None:
             "SELECT * FROM users WHERE ext_session=?", (token,)
         ).fetchone()
         return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Multi-account Google
+# ---------------------------------------------------------------------------
+
+def add_google_account(
+    user_id: int,
+    *,
+    email: str,
+    access_token: str,
+    refresh_token: str | None,
+    expiry: "datetime | None",
+) -> None:
+    enc_access = crypto.encrypt(access_token) if access_token else None
+    enc_refresh = crypto.encrypt(refresh_token) if refresh_token else None
+    expiry_str = expiry.isoformat() if expiry else None
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO google_accounts (user_id, email, access_token, refresh_token, token_expiry)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, email) DO UPDATE SET
+                 access_token=excluded.access_token,
+                 refresh_token=excluded.refresh_token,
+                 token_expiry=excluded.token_expiry""",
+            (user_id, email, enc_access, enc_refresh, expiry_str),
+        )
+
+
+def get_google_accounts(user_id: int) -> list[dict]:
+    """Return all connected Google accounts. Falls back to users table for legacy single-account."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT email, access_token, refresh_token, token_expiry FROM google_accounts WHERE user_id=? ORDER BY created_at",
+            (user_id,),
+        ).fetchall()
+    if rows:
+        result = []
+        for r in rows:
+            result.append({
+                "email": r["email"],
+                "access_token": crypto.decrypt(r["access_token"]) if r["access_token"] else None,
+                "refresh_token": crypto.decrypt(r["refresh_token"]) if r["refresh_token"] else None,
+                "expiry": datetime.fromisoformat(r["token_expiry"]) if r["token_expiry"] else None,
+            })
+        return result
+    # Fallback: legacy single-account in users table
+    access, refresh, expiry, email = get_google_tokens(user_id)
+    if access:
+        return [{"email": email, "access_token": access, "refresh_token": refresh, "expiry": expiry}]
+    return []
+
+
+def remove_google_account(user_id: int, email: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM google_accounts WHERE user_id=? AND email=?", (user_id, email))
+
+
+def update_google_account_token(user_id: int, email: str, access_token: str, expiry: "datetime | None") -> None:
+    enc_access = crypto.encrypt(access_token) if access_token else None
+    expiry_str = expiry.isoformat() if expiry else None
+    with db() as conn:
+        conn.execute(
+            "UPDATE google_accounts SET access_token=?, token_expiry=? WHERE user_id=? AND email=?",
+            (enc_access, expiry_str, user_id, email),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Multi-account Telegram
+# ---------------------------------------------------------------------------
+
+def add_telegram_account(user_id: int, phone: str, session_str: str) -> None:
+    enc = crypto.encrypt(session_str) if session_str else None
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO telegram_accounts (user_id, phone, session_str)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id, phone) DO UPDATE SET session_str=excluded.session_str""",
+            (user_id, phone, enc),
+        )
+
+
+def get_telegram_accounts(user_id: int) -> list[dict]:
+    """Return all connected Telegram accounts. Falls back to users table for legacy."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT phone, session_str FROM telegram_accounts WHERE user_id=? ORDER BY created_at",
+            (user_id,),
+        ).fetchall()
+    if rows:
+        return [
+            {
+                "phone": r["phone"],
+                "session_str": crypto.decrypt(r["session_str"]) if r["session_str"] else None,
+            }
+            for r in rows
+        ]
+    # Fallback: legacy single session in users table
+    session = get_telegram_session(user_id)
+    if session:
+        with db() as conn:
+            row = conn.execute("SELECT telegram_phone FROM users WHERE id=?", (user_id,)).fetchone()
+        phone = row["telegram_phone"] if row else ""
+        return [{"phone": phone or "", "session_str": session}]
+    return []
+
+
+def remove_telegram_account(user_id: int, phone: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM telegram_accounts WHERE user_id=? AND phone=?", (user_id, phone))
+
+
+# ---------------------------------------------------------------------------
+# Multi-account WhatsApp
+# ---------------------------------------------------------------------------
+
+def add_whatsapp_account(user_id: int, phone: str, session_id: str) -> None:
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO whatsapp_accounts (user_id, phone, session_id)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id, session_id) DO UPDATE SET phone=excluded.phone""",
+            (user_id, phone, session_id),
+        )
+
+
+def get_whatsapp_accounts(user_id: int) -> list[dict]:
+    """Return all connected WhatsApp accounts. Falls back to users table for legacy."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT phone, session_id FROM whatsapp_accounts WHERE user_id=? ORDER BY created_at",
+            (user_id,),
+        ).fetchall()
+    if rows:
+        return [{"phone": r["phone"] or "", "session_id": r["session_id"]} for r in rows]
+    # Fallback: legacy single account in users table
+    if get_whatsapp_connected(user_id):
+        with db() as conn:
+            row = conn.execute("SELECT whatsapp_phone FROM users WHERE id=?", (user_id,)).fetchone()
+        phone = row["whatsapp_phone"] if row else ""
+        return [{"phone": phone or "", "session_id": str(user_id)}]
+    return []
+
+
+def remove_whatsapp_account(user_id: int, session_id: str) -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM whatsapp_accounts WHERE user_id=? AND session_id=?", (user_id, session_id))
+    # If no accounts left, clear legacy flag too
+    with db() as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) as c FROM whatsapp_accounts WHERE user_id=?", (user_id,)
+        ).fetchone()["c"]
+    if remaining == 0:
+        with db() as conn:
+            conn.execute("UPDATE users SET whatsapp_connected=0, whatsapp_phone=NULL WHERE id=?", (user_id,))
