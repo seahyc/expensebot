@@ -198,9 +198,13 @@ def format_dupe_warning(hints: list[DupeHint]) -> str:
         return ""
     lines = ["⚠ POSSIBLE DUPLICATE(S) — same amount/date/merchant already on OmniHR:"]
     for h in hints:
+        # Merchant is user-controlled data echoed into the agent's tool result.
+        # Strip control chars + cap length so a crafted merchant name can't
+        # inject a fake SYSTEM line via embedded newlines.
+        safe_merchant = (h.merchant or "?").replace("\n", " ").replace("\r", " ")[:80]
         lines.append(
             f"- #{h.submission_id} {h.receipt_date.isoformat()} "
-            f"{h.merchant or '?'} {h.amount} (status={h.status})"
+            f"{safe_merchant} {h.amount} (status={h.status})"
         )
     lines.append(
         "If this is the same transaction, warn the user before filing. "

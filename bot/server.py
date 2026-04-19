@@ -1090,7 +1090,9 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             dupe_warning = ""
             try:
                 async with client_for(u) as client:
-                    recent = await client.list_submissions(page_size=60)
+                    # 90 matches the submit-side merchant-record paging window in
+                    # omnihr_client.get_submission — keep the dupe horizon aligned.
+                    recent = await client.list_submissions(page_size=90)
                 hints = match_dupes(parsed, recent.get("results", []))
                 dupe_warning = format_dupe_warning(hints)
             except Exception as e:
