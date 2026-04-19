@@ -110,6 +110,33 @@ class _PendingFile:
     parsed: ParsedReceipt
     policies: list  # list[PolicyEntry]
     user_note: str
+    triangulation_md: str | None = None
+
+
+def _infer_receipt_type(parsed: ParsedReceipt) -> str:
+    """Infer receipt type from parsed fields for triangulation window selection."""
+    merchant = (parsed.merchant or "").lower()
+    sub_cat = (parsed.suggested_sub_category_label or "").lower()
+    combined = merchant + " " + sub_cat
+
+    transport_keywords = {"grab", "gojek", "grab express", "comfort", "transit", "mrt", "bus", "taxi", "lyft", "uber"}
+    flight_keywords = {"flight", "airfare", "airline", "airasia", "scoot", "singapore air", "jetstar"}
+    meal_keywords = {"meal", "food", "restaurant", "cafe", "coffee", "starbucks", "lunch", "dinner", "breakfast", "hawker"}
+    hotel_keywords = {"hotel", "accommodation", "inn", "resort", "marriott", "hilton", "ibis"}
+
+    for kw in transport_keywords:
+        if kw in combined:
+            return "transport"
+    for kw in flight_keywords:
+        if kw in combined:
+            return "flight"
+    for kw in meal_keywords:
+        if kw in combined:
+            return "meal"
+    for kw in hotel_keywords:
+        if kw in combined:
+            return "hotel"
+    return "other"
 
 
 # keyed by Telegram chat_id (int)
@@ -1008,7 +1035,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 triangulate(
                     merchant=parsed.merchant or "",
                     dt=dt,
-                    receipt_type="other",
+                    receipt_type=_infer_receipt_type(parsed),
                 ),
                 timeout=5.0,
             )
@@ -1597,7 +1624,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     triangulate(
                         merchant=parsed.merchant,
                         dt=receipt_dt,
-                        receipt_type="other",
+                        receipt_type=_infer_receipt_type(parsed),
                     ),
                     timeout=2.0,
                 )
@@ -1621,6 +1648,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             parsed=parsed,
             policies=policies,
             user_note=user_note,
+            triangulation_md=triangulation_md,
         )
         confirm_text, confirm_kb = _build_confirm_message(
             parsed, policies, sha=sha, triangulation_md=triangulation_md
