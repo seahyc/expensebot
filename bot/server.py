@@ -563,6 +563,46 @@ async def cmd_connect_whatsapp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+async def cmd_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show integration connection status and how to connect each one."""
+    if not await _gate(update):
+        return
+    u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
+    if not u:
+        await update.message.reply_text("Run /start first.")
+        return
+
+    uid = u["id"]
+    google_ok = bool(storage.get_google_tokens(uid)[0])
+    tg_ok = bool(storage.get_telegram_session(uid))
+    wa_ok = storage.get_whatsapp_connected(uid)
+
+    lines = ["*Janai — connection status*\n"]
+
+    lines.append(f"{'✅' if u.get('access_jwt') else '❌'} *OmniHR* — expense filing")
+    if not u.get("access_jwt"):
+        lines.append("  → /pair to connect\n")
+
+    lines.append(f"{'✅' if google_ok else '⬜'} *Gmail & Calendar* — find receipts in email, build your profile")
+    if not google_ok:
+        lines.append("  → /connect\\_google then use the extension\n")
+
+    lines.append(f"{'✅' if tg_ok else '⬜'} *Telegram messages* — read your chats for expense context")
+    if not tg_ok:
+        lines.append("  → /connect\\_telegram then use the extension\n")
+
+    lines.append(f"{'✅' if wa_ok else '⬜'} *WhatsApp messages* — read your chats for expense context")
+    if not wa_ok:
+        lines.append("  → /connect\\_whatsapp then scan QR in the extension\n")
+
+    if google_ok and tg_ok and wa_ok:
+        lines.append("\n_All integrations connected. I'll keep your profile updated automatically._")
+    else:
+        lines.append("\n_Each integration helps me know you better — fewer questions, faster filing._")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 _STATUS_EMOJI = {
     3: "📝",   # draft
     7: "📤",   # for approval
@@ -2501,6 +2541,7 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("delete", cmd_delete))
     tg_app.add_handler(CommandHandler("submit", cmd_submit))
     tg_app.add_handler(CommandHandler("memories", cmd_memories))
+    tg_app.add_handler(CommandHandler("setup", cmd_setup))
     tg_app.add_handler(CommandHandler("connect_google", cmd_connect_google))
     tg_app.add_handler(CommandHandler("connect_telegram", cmd_connect_telegram))
     tg_app.add_handler(CommandHandler("connect_whatsapp", cmd_connect_whatsapp))
