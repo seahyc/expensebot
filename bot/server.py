@@ -416,16 +416,49 @@ def _next_step_prompt(user_db_id: int, u: dict | None, first_name: str | None = 
     return ready_prompt(first_name, u)
 
 
+def _setup_status_text(u: dict) -> str:
+    """Build connection status message for fully-paired users."""
+    uid = u["id"]
+    google_ok = bool(storage.get_google_tokens(uid)[0])
+    tg_ok = bool(storage.get_telegram_session(uid))
+    wa_ok = storage.get_whatsapp_connected(uid)
+
+    lines = ["*Janai — connection status*\n"]
+    lines.append(f"✅ *OmniHR* — expense filing")
+    lines.append(f"{'✅' if google_ok else '⬜'} *Gmail & Calendar* — receipts in email, spending profile")
+    if not google_ok:
+        lines.append("  → /connect\\_google then use the extension")
+    lines.append(f"{'✅' if tg_ok else '⬜'} *Telegram messages* — read your chats for context")
+    if not tg_ok:
+        lines.append("  → /connect\\_telegram then use the extension")
+    lines.append(f"{'✅' if wa_ok else '⬜'} *WhatsApp messages* — read your chats for context")
+    if not wa_ok:
+        lines.append("  → /connect\\_whatsapp then scan QR in the extension")
+    if google_ok and tg_ok and wa_ok:
+        lines.append("\n_All connected. I'll keep your profile updated automatically._")
+    else:
+        lines.append("\n_Each integration helps me know you better — fewer questions, faster filing._")
+    return "\n".join(lines)
+
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _gate(update):
         return
     user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
     u = storage.get_user(user_db_id)
-    await update.message.reply_text(
-        _next_step_prompt(user_db_id, u, update.effective_user.first_name),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
+    has_omnihr = bool(u and u.get("access_jwt"))
+    if has_omnihr:
+        # Already set up — show integration status instead of onboarding steps
+        await update.message.reply_text(
+            _setup_status_text(u),
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            _next_step_prompt(user_db_id, u, update.effective_user.first_name),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
 
 
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -564,43 +597,8 @@ async def cmd_connect_whatsapp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
 
 async def cmd_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show integration connection status and how to connect each one."""
-    if not await _gate(update):
-        return
-    u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
-    if not u:
-        await update.message.reply_text("Run /start first.")
-        return
-
-    uid = u["id"]
-    google_ok = bool(storage.get_google_tokens(uid)[0])
-    tg_ok = bool(storage.get_telegram_session(uid))
-    wa_ok = storage.get_whatsapp_connected(uid)
-
-    lines = ["*Janai — connection status*\n"]
-
-    lines.append(f"{'✅' if u.get('access_jwt') else '❌'} *OmniHR* — expense filing")
-    if not u.get("access_jwt"):
-        lines.append("  → /pair to connect\n")
-
-    lines.append(f"{'✅' if google_ok else '⬜'} *Gmail & Calendar* — find receipts in email, build your profile")
-    if not google_ok:
-        lines.append("  → /connect\\_google then use the extension\n")
-
-    lines.append(f"{'✅' if tg_ok else '⬜'} *Telegram messages* — read your chats for expense context")
-    if not tg_ok:
-        lines.append("  → /connect\\_telegram then use the extension\n")
-
-    lines.append(f"{'✅' if wa_ok else '⬜'} *WhatsApp messages* — read your chats for expense context")
-    if not wa_ok:
-        lines.append("  → /connect\\_whatsapp then scan QR in the extension\n")
-
-    if google_ok and tg_ok and wa_ok:
-        lines.append("\n_All integrations connected. I'll keep your profile updated automatically._")
-    else:
-        lines.append("\n_Each integration helps me know you better — fewer questions, faster filing._")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    """/setup is an alias for /start."""
+    await cmd_start(update, ctx)
 
 
 _STATUS_EMOJI = {
@@ -2581,8 +2579,7 @@ async def run() -> None:
     try:
         from telegram import BotCommand
         await tg_app.bot.set_my_commands([
-            BotCommand("start", "Welcome & setup"),
-            BotCommand("setup", "Connection status & integrations"),
+            BotCommand("start", "Status & integrations"),
             BotCommand("login", "Connect your Claude AI"),
             BotCommand("pair", "Link your OmniHR account"),
             BotCommand("connect_google", "Connect Gmail & Calendar"),
