@@ -13,6 +13,24 @@ const googleStatusEl = document.getElementById("google-status");
 const googleCodeEl = document.getElementById("google-code");
 const googleConnectBtn = document.getElementById("google-connect");
 
+// Telegram elements
+const tgStatusEl = document.getElementById("tg-status");
+const tgStep1El = document.getElementById("tg-step1");
+const tgStep2El = document.getElementById("tg-step2");
+const tgCodeEl = document.getElementById("tg-code");
+const tgPhoneEl = document.getElementById("tg-phone");
+const tgInitBtn = document.getElementById("tg-init");
+const tgOtpEl = document.getElementById("tg-otp");
+const tgVerifyBtn = document.getElementById("tg-verify");
+
+// WhatsApp elements
+const waStatusEl = document.getElementById("wa-status");
+const waStep1El = document.getElementById("wa-step1");
+const waCodeEl = document.getElementById("wa-code");
+const waInitBtn = document.getElementById("wa-init");
+const waQrContainerEl = document.getElementById("wa-qr-container");
+const waQrEl = document.getElementById("wa-qr");
+
 // Fetch Google client_id from backend so it doesn't need to be hardcoded here.
 let googleClientId = null;
 try {
@@ -158,5 +176,182 @@ googleConnectBtn.addEventListener("click", async () => {
     googleConnectBtn.disabled = false;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Telegram connect flow
+// ---------------------------------------------------------------------------
+
+// Stores the pairing code during the two-step flow so verify can use it
+let tgPairingCode = null;
+
+tgInitBtn.addEventListener("click", async () => {
+  const code = tgCodeEl.value.trim();
+  const phone = tgPhoneEl.value.trim();
+
+  if (!/^\d{6}$/.test(code)) {
+    tgStatusEl.className = "status err";
+    tgStatusEl.textContent = "Code must be 6 digits.";
+    return;
+  }
+  if (!phone || !/^\+\d{7,15}$/.test(phone)) {
+    tgStatusEl.className = "status err";
+    tgStatusEl.textContent = "Enter a valid phone number (e.g. +6591234567).";
+    return;
+  }
+
+  tgInitBtn.disabled = true;
+  tgStatusEl.className = "status warn";
+  tgStatusEl.textContent = "Sending code to Telegram…";
+
+  try {
+    const r = await fetch(`${BACKEND}/extension/telegram-init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairing_code: code, phone }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+
+    tgPairingCode = code;
+    tgStatusEl.className = "status warn";
+    tgStatusEl.textContent = "Code sent — check your Telegram app.";
+    tgStep1El.style.display = "none";
+    tgStep2El.style.display = "";
+  } catch (e) {
+    tgStatusEl.className = "status err";
+    tgStatusEl.textContent = `Failed: ${e.message}`;
+    tgInitBtn.disabled = false;
+  }
+});
+
+tgVerifyBtn.addEventListener("click", async () => {
+  const otp = tgOtpEl.value.trim();
+  if (!/^\d{5,6}$/.test(otp)) {
+    tgStatusEl.className = "status err";
+    tgStatusEl.textContent = "Enter the code Telegram sent you.";
+    return;
+  }
+  if (!tgPairingCode) {
+    tgStatusEl.className = "status err";
+    tgStatusEl.textContent = "Session lost — start over.";
+    return;
+  }
+
+  tgVerifyBtn.disabled = true;
+  tgStatusEl.className = "status warn";
+  tgStatusEl.textContent = "Verifying…";
+
+  try {
+    const r = await fetch(`${BACKEND}/extension/telegram-verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairing_code: tgPairingCode, code: otp }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+
+    tgStatusEl.className = "status ok";
+    tgStatusEl.textContent = "✅ Connected";
+    tgStep2El.style.display = "none";
+    tgPairingCode = null;
+  } catch (e) {
+    tgStatusEl.className = "status err";
+    tgStatusEl.textContent = `Verification failed: ${e.message}`;
+    tgVerifyBtn.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// WhatsApp connect flow
+// ---------------------------------------------------------------------------
+
+let waPairingCode = null;
+let waPollingTimer = null;
+
+waInitBtn.addEventListener("click", async () => {
+  const code = waCodeEl.value.trim();
+  if (!/^\d{6}$/.test(code)) {
+    waStatusEl.className = "status err";
+    waStatusEl.textContent = "Code must be 6 digits.";
+    return;
+  }
+
+  waInitBtn.disabled = true;
+  waStatusEl.className = "status warn";
+  waStatusEl.textContent = "Starting WhatsApp session…";
+
+  try {
+    const r = await fetch(`${BACKEND}/extension/whatsapp-init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairing_code: code }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+
+    waPairingCode = code;
+    waStatusEl.className = "status warn";
+    waStatusEl.textContent = "Loading QR code…";
+    waStep1El.style.display = "none";
+    waQrContainerEl.style.display = "";
+
+    // Start polling for QR / connection
+    startWaPolling();
+  } catch (e) {
+    waStatusEl.className = "status err";
+    waStatusEl.textContent = `Failed: ${e.message}`;
+    waInitBtn.disabled = false;
+  }
+});
+
+function startWaPolling() {
+  if (waPollingTimer) clearInterval(waPollingTimer);
+  waPollingTimer = setInterval(pollWaStatus, 3000);
+  // Poll immediately
+  pollWaStatus();
+}
+
+async function pollWaStatus() {
+  if (!waPairingCode) return;
+
+  try {
+    // First try to get the QR image
+    const qrResp = await fetch(
+      `${BACKEND}/extension/whatsapp-qr?pairing_code=${encodeURIComponent(waPairingCode)}`
+    );
+    if (qrResp.ok) {
+      const qrData = await qrResp.json();
+      if (qrData.connected) {
+        // Already connected according to QR endpoint
+        onWaConnected(null);
+        return;
+      }
+      if (qrData.qr) {
+        waQrEl.src = qrData.qr;
+      }
+    }
+
+    // Also check status
+    const statusResp = await fetch(
+      `${BACKEND}/extension/whatsapp-status?pairing_code=${encodeURIComponent(waPairingCode)}`
+    );
+    if (statusResp.ok) {
+      const statusData = await statusResp.json();
+      if (statusData.connected) {
+        onWaConnected(statusData.phone);
+      }
+    }
+  } catch (_) {
+    // Bridge may not be running — ignore silently
+  }
+}
+
+function onWaConnected(phone) {
+  if (waPollingTimer) {
+    clearInterval(waPollingTimer);
+    waPollingTimer = null;
+  }
+  waPairingCode = null;
+  waQrContainerEl.style.display = "none";
+  waStatusEl.className = "status ok";
+  waStatusEl.textContent = phone ? `✅ Connected as ${phone}` : "✅ Connected";
+}
 
 init();

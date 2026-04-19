@@ -50,13 +50,17 @@ async def build_boss_profile(
     now = datetime.now(timezone.utc)
     ninety_days_ago = now - timedelta(days=90)
 
-    # Gather Gmail + Calendar in parallel (best-effort — no merchant filter for gmail)
+    # Gather Gmail + Calendar + Telegram + WhatsApp in parallel (all best-effort)
     gmail_threads: list[str] = []
     cal_events: list[str] = []
+    tg_msgs: list[str] = []
+    wa_msgs: list[str] = []
     try:
-        gmail_threads, cal_events = await asyncio.gather(
+        gmail_threads, cal_events, tg_msgs, wa_msgs = await asyncio.gather(
             _bulk_gmail(user_id=user_id, since=ninety_days_ago),
             _bulk_gcal(user_id=user_id, since=ninety_days_ago, until=now + timedelta(days=30)),
+            _bulk_telegram(user_id=user_id, since=ninety_days_ago),
+            _bulk_whatsapp(user_id=user_id, since=ninety_days_ago),
             return_exceptions=True,
         )
         if isinstance(gmail_threads, Exception):
@@ -65,6 +69,12 @@ async def build_boss_profile(
         if isinstance(cal_events, Exception):
             log.warning("boss_profile gcal error: %s", cal_events)
             cal_events = []
+        if isinstance(tg_msgs, Exception):
+            log.warning("boss_profile telegram error: %s", tg_msgs)
+            tg_msgs = []
+        if isinstance(wa_msgs, Exception):
+            log.warning("boss_profile whatsapp error: %s", wa_msgs)
+            wa_msgs = []
     except Exception as e:
         log.warning("boss_profile gather error: %s", e)
 
@@ -72,8 +82,16 @@ async def build_boss_profile(
     claims_text = _format_claims(omnihr_claims)
     gmail_text = "\n".join(f"- {t}" for t in gmail_threads[:40]) or "(none)"
     cal_text = "\n".join(f"- {e}" for e in cal_events[:40]) or "(none)"
+    tg_text = "\n".join(f"- {m}" for m in tg_msgs[:40]) or "(none)"
+    wa_text = "\n".join(f"- {m}" for m in wa_msgs[:40]) or "(none)"
 
-    if not claims_text and gmail_text == "(none)" and cal_text == "(none)":
+    if (
+        not claims_text
+        and gmail_text == "(none)"
+        and cal_text == "(none)"
+        and tg_text == "(none)"
+        and wa_text == "(none)"
+    ):
         return ""
 
     user_data = f"""
@@ -85,6 +103,12 @@ async def build_boss_profile(
 
 ## Calendar events (next 30 days + last 90 days, sample)
 {cal_text}
+
+## Recent Telegram messages (sample)
+{tg_text}
+
+## Recent WhatsApp messages (sample)
+{wa_text}
 """.strip()
 
     try:
@@ -245,4 +269,45 @@ async def _bulk_gcal(*, user_id: int, since: datetime, until: datetime) -> list[
         return results
     except Exception as e:
         log.warning("_bulk_gcal error: %s", e)
+        return []
+
+
+async def _bulk_telegram(*, user_id: int, since: datetime) -> list[str]:
+    """Fetch recent expense-related Telegram messages using the stored session."""
+    from .. import storage
+    from .telegram_reader import fetch_recent_messages
+
+    session_str = storage.get_telegram_session(user_id)
+    if not session_str:
+        return []
+    try:
+        return await fetch_recent_messages(session_str, since)
+    except Exception as e:
+        log.warning("_bulk_telegram error for user=%s: %s", user_id, e)
+        return []
+
+
+async def _bulk_whatsapp(*, user_id: int, since: datetime) -> list[str]:
+    """Fetch recent WhatsApp messages from the local bridge service."""
+    import httpx
+    import os
+
+    from .. import storage
+
+    bridge = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+    if not storage.get_whatsapp_connected(user_id):
+        return []
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{bridge}/messages/{user_id}",
+                params={"since": int(since.timestamp())},
+                timeout=5.0,
+            )
+            if r.status_code != 200:
+                return []
+            msgs = r.json().get("messages", [])
+            return [m["text"][:120] for m in msgs[:60] if m.get("text")]
+    except Exception as e:
+        log.warning("_bulk_whatsapp error for user=%s: %s", user_id, e)
         return []

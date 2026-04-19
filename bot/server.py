@@ -527,6 +527,42 @@ async def cmd_connect_google(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def cmd_connect_telegram(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a pairing code for connecting the user's personal Telegram account."""
+    if not await _gate(update):
+        return
+    user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    if not await _check_rate(update, user_db_id, "pair"):
+        return
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
+    await update.message.reply_text(
+        f"Open the Janai extension, go to the Connections tab, and enter this code:\n\n"
+        f"`{code}`\n\n"
+        f"Then enter your phone number to connect Telegram.\n\n"
+        f"_(Code valid for 5 minutes.)_",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_connect_whatsapp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a pairing code for connecting the user's WhatsApp account."""
+    if not await _gate(update):
+        return
+    user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    if not await _check_rate(update, user_db_id, "pair"):
+        return
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
+    await update.message.reply_text(
+        f"Open the Janai extension, go to the Connections tab, and enter this code:\n\n"
+        f"`{code}`\n\n"
+        f"Then scan the QR code with WhatsApp → Linked Devices → Link a Device.\n\n"
+        f"_(Code valid for 5 minutes.)_",
+        parse_mode="Markdown",
+    )
+
+
 _STATUS_EMOJI = {
     3: "📝",   # draft
     7: "📤",   # for approval
@@ -2157,6 +2193,218 @@ async function submitKey(){{
 
         return {"ok": True, "email": google_email}
 
+    # -----------------------------------------------------------------------
+    # Telegram personal reader endpoints
+    # -----------------------------------------------------------------------
+
+    # In-memory phone lookup for telegram init → verify handshake
+    # Maps user_db_id -> E.164 phone string
+    _tg_phones: dict[int, str] = {}
+
+    class TelegramInitPayload(BaseModel):
+        pairing_code: str
+        phone: str  # E.164
+
+    class TelegramVerifyPayload(BaseModel):
+        pairing_code: str
+        code: str  # OTP from Telegram
+
+    @app.post("/extension/telegram-init")
+    async def extension_telegram_init(payload: TelegramInitPayload, request: Request) -> dict:
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
+        if not ok:
+            raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
+
+        if not re.fullmatch(r"\d{6}", payload.pairing_code or ""):
+            raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+
+        # Peek at pairing code without consuming — we need it again for verify
+        with storage.db() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM pairing_codes WHERE code=? AND expires_at >= datetime('now')",
+                (payload.pairing_code,),
+            ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
+        user_db_id = row["user_id"]
+
+        _tg_phones[user_db_id] = payload.phone
+
+        from .common.telegram_reader import start_phone_auth
+        try:
+            await start_phone_auth(user_db_id, payload.phone)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Telegram auth failed: {e}")
+
+        return {"ok": True}
+
+    @app.post("/extension/telegram-verify")
+    async def extension_telegram_verify(payload: TelegramVerifyPayload, request: Request) -> dict:
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
+        if not ok:
+            raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
+
+        if not re.fullmatch(r"\d{6}", payload.pairing_code or ""):
+            raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+
+        user_db_id = storage.consume_pairing_code(payload.pairing_code)
+        if not user_db_id:
+            raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
+
+        from .common.telegram_reader import verify_phone_code, _pending as _tg_pending
+        if user_db_id not in _tg_pending:
+            raise HTTPException(status_code=400, detail="No pending Telegram auth — call /telegram-init first")
+
+        try:
+            session_str = await verify_phone_code(user_db_id, payload.code)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Telegram verification failed: {e}")
+
+        if not session_str:
+            raise HTTPException(status_code=400, detail="Verification failed — invalid code?")
+
+        phone = _tg_phones.pop(user_db_id, "")
+        storage.set_telegram_session(user_db_id, session_str, phone)
+
+        user = storage.get_user(user_db_id)
+
+        # Kick off a background boss profile rebuild
+        if tg_app and user:
+            asyncio.create_task(_build_boss_profile_bg(user, tg_app))
+            try:
+                await tg_app.bot.send_message(
+                    chat_id=int(user["channel_user_id"]),
+                    text="Telegram connected. I'll now read your messages when building your profile. 📱",
+                )
+            except Exception as e:
+                log.warning("Couldn't DM after telegram-verify: %s", e)
+
+        return {"ok": True}
+
+    # -----------------------------------------------------------------------
+    # WhatsApp bridge endpoints
+    # -----------------------------------------------------------------------
+
+    class WhatsAppInitPayload(BaseModel):
+        pairing_code: str
+
+    WHATSAPP_BRIDGE_URL = os.environ.get("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+
+    @app.post("/extension/whatsapp-init")
+    async def extension_whatsapp_init(payload: WhatsAppInitPayload, request: Request) -> dict:
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
+        if not ok:
+            raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
+
+        if not re.fullmatch(r"\d{6}", payload.pairing_code or ""):
+            raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+
+        # Peek without consuming — QR polling needs the pairing code still valid
+        with storage.db() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM pairing_codes WHERE code=? AND expires_at >= datetime('now')",
+                (payload.pairing_code,),
+            ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
+        user_db_id = row["user_id"]
+
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"{WHATSAPP_BRIDGE_URL}/session/{user_db_id}",
+                    timeout=10.0,
+                )
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"WhatsApp bridge error: {r.text[:200]}")
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"WhatsApp bridge unreachable: {e}")
+
+        return {"ok": True, "session_id": str(user_db_id)}
+
+    @app.get("/extension/whatsapp-qr")
+    async def extension_whatsapp_qr(pairing_code: str, request: Request) -> dict:
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
+        if not ok:
+            raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
+
+        if not re.fullmatch(r"\d{6}", pairing_code or ""):
+            raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+
+        with storage.db() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM pairing_codes WHERE code=? AND expires_at >= datetime('now')",
+                (pairing_code,),
+            ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
+        user_db_id = row["user_id"]
+
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{WHATSAPP_BRIDGE_URL}/qr/{user_db_id}",
+                    timeout=5.0,
+                )
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail="Bridge error")
+            return r.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"WhatsApp bridge unreachable: {e}")
+
+    @app.get("/extension/whatsapp-status")
+    async def extension_whatsapp_status(pairing_code: str, request: Request) -> dict:
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
+        if not ok:
+            raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
+
+        if not re.fullmatch(r"\d{6}", pairing_code or ""):
+            raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+
+        with storage.db() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM pairing_codes WHERE code=? AND expires_at >= datetime('now')",
+                (pairing_code,),
+            ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
+        user_db_id = row["user_id"]
+
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{WHATSAPP_BRIDGE_URL}/status/{user_db_id}",
+                    timeout=5.0,
+                )
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail="Bridge error")
+            data = r.json()
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=503, detail=f"WhatsApp bridge unreachable: {e}")
+
+        # If newly connected and not yet stored, persist and trigger profile rebuild
+        connected = data.get("connected", False)
+        phone = data.get("phone") or ""
+        if connected and not storage.get_whatsapp_connected(user_db_id):
+            storage.set_whatsapp_connected(user_db_id, phone)
+            user = storage.get_user(user_db_id)
+            if tg_app and user:
+                asyncio.create_task(_build_boss_profile_bg(user, tg_app))
+                try:
+                    await tg_app.bot.send_message(
+                        chat_id=int(user["channel_user_id"]),
+                        text=f"WhatsApp connected{' as ' + phone if phone else ''}. Reading your history now. 📲",
+                    )
+                except Exception as e:
+                    log.warning("Couldn't DM after whatsapp-status: %s", e)
+
+        return {"connected": connected, "phone": phone or None}
+
     return app
 
 
@@ -2223,6 +2471,8 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("submit", cmd_submit))
     tg_app.add_handler(CommandHandler("memories", cmd_memories))
     tg_app.add_handler(CommandHandler("connect_google", cmd_connect_google))
+    tg_app.add_handler(CommandHandler("connect_telegram", cmd_connect_telegram))
+    tg_app.add_handler(CommandHandler("connect_whatsapp", cmd_connect_whatsapp))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

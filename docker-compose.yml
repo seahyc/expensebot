@@ -19,6 +19,24 @@ services:
       - backend_default
     # exposed internally only; Caddy reverse-proxies to expensebot:8000
 
+  whatsapp-bridge:
+    build:
+      context: ./services/whatsapp-bridge
+      dockerfile: Dockerfile
+    container_name: whatsapp-bridge
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./data/whatsapp-auth:/app/auth
+      - ./data/whatsapp-db:/app/db
+    environment:
+      - PORT=3001
+      - AUTH_DIR=/app/auth
+      - DB_PATH=/app/db/messages.db
+    restart: unless-stopped
+    networks:
+      - backend_default
+
 networks:
   backend_default:
     external: true

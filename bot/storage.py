@@ -134,6 +134,10 @@ _ADD_COLS = [
     ("users", "google_email", "TEXT"),         # connected Google account email
     ("users", "boss_profile_md", "TEXT"),      # secretary's briefing — built from claims+gmail+gcal
     ("users", "boss_profile_updated_at", "TEXT"),  # ISO UTC; last full rebuild
+    ("users", "telegram_session", "TEXT"),     # encrypted Telethon StringSession
+    ("users", "telegram_phone", "TEXT"),       # E.164 phone for display
+    ("users", "whatsapp_phone", "TEXT"),       # E.164 for display
+    ("users", "whatsapp_connected", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -881,3 +885,45 @@ def top_merchants(user_id: int, limit: int = 20) -> list[dict]:
             (user_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# --- Telegram session ---
+
+def set_telegram_session(user_id: int, session_str: str, phone: str) -> None:
+    """Encrypt and store a Telethon StringSession for a user."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET telegram_session=?, telegram_phone=? WHERE id=?",
+            (crypto.encrypt(session_str), phone, user_id),
+        )
+
+
+def get_telegram_session(user_id: int) -> str | None:
+    """Return the decrypted Telethon StringSession, or None if not connected."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT telegram_session FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        if not row or not row["telegram_session"]:
+            return None
+        return crypto.decrypt(row["telegram_session"])
+
+
+# --- WhatsApp connection ---
+
+def set_whatsapp_connected(user_id: int, phone: str) -> None:
+    """Mark WhatsApp as connected for a user and store their E.164 phone."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET whatsapp_phone=?, whatsapp_connected=1 WHERE id=?",
+            (phone, user_id),
+        )
+
+
+def get_whatsapp_connected(user_id: int) -> bool:
+    """Return True if the user has a connected WhatsApp session."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT whatsapp_connected FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        return bool(row and row["whatsapp_connected"])

@@ -21,6 +21,7 @@ dependencies = [
   "claude-agent-sdk>=0.1",
   "apscheduler>=3.10",
   "pyyaml>=6",
+  "telethon>=1.36",
 ]
 
 [project.optional-dependencies]

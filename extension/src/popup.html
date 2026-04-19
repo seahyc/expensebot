@@ -25,11 +25,40 @@
 
   <hr style="margin: 14px 0; border: none; border-top: 1px solid #e0e0e0;">
 
-  <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Gmail & Calendar</div>
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Gmail &amp; Calendar</div>
   <div id="google-status" class="status warn">Not connected</div>
   <input id="google-code" placeholder="6-digit code from /connect_google" maxlength="6" autocomplete="off">
   <button id="google-connect">Connect Google</button>
   <div class="small">Run <code>/connect_google</code> in your bot to get a code.</div>
+
+  <hr style="margin: 14px 0; border: none; border-top: 1px solid #e0e0e0;">
+
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Telegram Messages</div>
+  <div id="tg-status" class="status warn">Not connected</div>
+  <div id="tg-step1">
+    <input id="tg-code" placeholder="6-digit code from /connect_telegram" maxlength="6" autocomplete="off">
+    <input id="tg-phone" placeholder="Phone number (e.g. +6591234567)">
+    <button id="tg-init">Connect Telegram</button>
+    <div class="small">Run <code>/connect_telegram</code> in bot to get a code.</div>
+  </div>
+  <div id="tg-step2" style="display:none">
+    <input id="tg-otp" placeholder="Code sent to your Telegram" maxlength="6">
+    <button id="tg-verify">Verify</button>
+  </div>
+
+  <hr style="margin: 14px 0; border: none; border-top: 1px solid #e0e0e0;">
+
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">WhatsApp Messages</div>
+  <div id="wa-status" class="status warn">Not connected</div>
+  <div id="wa-step1">
+    <input id="wa-code" placeholder="6-digit code from /connect_whatsapp" maxlength="6" autocomplete="off">
+    <button id="wa-init">Connect WhatsApp</button>
+    <div class="small">Run <code>/connect_whatsapp</code> in bot to get a code.</div>
+  </div>
+  <div id="wa-qr-container" style="display:none; text-align:center;">
+    <img id="wa-qr" style="width:200px;height:200px;" alt="WhatsApp QR">
+    <div class="small">Scan with WhatsApp → Linked Devices → Link a Device</div>
+  </div>
 
   <script type="module" src="popup.js"></script>
 </body>
