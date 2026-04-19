@@ -681,14 +681,18 @@ def list_active_users() -> list[dict]:
 
     'Active' here means paired — the access token may be stale (the refresh
     sweeper handles re-minting), but the user has at least gone through the
-    pairing flow. We exclude users whose refresh token is already dead.
+    pairing flow. We exclude users whose refresh token is already dead,
+    users without a paired OmniHR employee ID, and non-Telegram users
+    (heartbeat only sends Telegram messages).
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     with db() as conn:
         rows = conn.execute(
             """SELECT * FROM users
                WHERE access_jwt IS NOT NULL
-                 AND refresh_expires_at > ?""",
+                 AND refresh_expires_at > ?
+                 AND omnihr_employee_id IS NOT NULL
+                 AND channel = 'telegram'""",
             (now_iso,),
         ).fetchall()
         return [dict(r) for r in rows]

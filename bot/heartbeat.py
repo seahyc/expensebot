@@ -22,8 +22,9 @@ from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+import json
+
 from . import storage
-from .common import context_lookup
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ class HeartbeatRunner:
             "interval",
             minutes=HEARTBEAT_INTERVAL,
             id="heartbeat",
+            misfire_grace_time=60,
         )
         self.scheduler.start()
         log.info(
@@ -138,16 +140,20 @@ class HeartbeatRunner:
         if not self._is_active_hours():
             log.debug("Heartbeat tick skipped — outside active hours")
             return
+        try:
+            tasks = self._load_tasks()
+        except Exception:
+            log.exception("Failed to load HEARTBEAT tasks — skipping tick")
+            return
         users = storage.list_active_users()
         log.info("Heartbeat tick: %d active user(s)", len(users))
         for user in users:
             try:
-                await self._tick_user(user)
+                await self._tick_user(user, tasks)
             except Exception:
                 log.exception("Heartbeat tick failed for user %s", user["id"])
 
-    async def _tick_user(self, user: dict) -> None:
-        tasks = self._load_tasks()
+    async def _tick_user(self, user: dict, tasks: list[dict]) -> None:
         for task in tasks:
             task_id = task["id"]
             every_hours = _parse_every(task["every"])
@@ -307,15 +313,11 @@ def _build_heartbeat_tool_executor(user: dict, omnihr_factory):
             try:
                 # Use _run_gw directly for a free-form Gmail query
                 from .common.context_lookup import _run_gw
-                import json as _json
-                raw = await asyncio.wait_for(
-                    _run_gw("gmail", "search", query, "--max-results", "5"),
-                    timeout=8.0,
-                )
+                raw = await _run_gw("gmail", "search", query, "--max-results", "5")
                 if not raw.strip():
                     return "No matching emails found."
                 try:
-                    data = _json.loads(raw)
+                    data = json.loads(raw)
                     messages = data if isinstance(data, list) else data.get("messages", [])
                     results = []
                     for msg in messages[:5]:
@@ -327,11 +329,9 @@ def _build_heartbeat_tool_executor(user: dict, omnihr_factory):
                                 entry += f" (from {sender})"
                             results.append(entry)
                     return "\n".join(results) if results else "No matching emails found."
-                except (_json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError):
                     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
                     return "\n".join(lines[:5]) if lines else "No matching emails found."
-            except asyncio.TimeoutError:
-                return "Gmail search timed out."
             except Exception as e:
                 log.warning("search_email_context failed in heartbeat for user=%s: %s", user["id"], e)
                 return f"Error searching Gmail: {e}"

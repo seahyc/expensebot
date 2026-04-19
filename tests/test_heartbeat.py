@@ -310,7 +310,7 @@ async def test_heartbeat_ok_suppresses_message(runner, mock_bot, mock_anth, tmp_
 
     mock_anth.messages.create.return_value = _make_text_response("HEARTBEAT_OK")
 
-    await runner._tick_user({**user, "channel": "telegram", "channel_user_id": "9990000"})
+    await runner._tick_user({**user, "channel": "telegram", "channel_user_id": "9990000"}, runner._load_tasks())
 
     # No Telegram message should be sent
     mock_bot.send_message.assert_not_called()
@@ -334,7 +334,7 @@ async def test_actionable_response_sends_message(runner, mock_bot, mock_anth, tm
         "Hey darling, you've got 2 drafts older than 3 days — don't forget to submit them!"
     )
 
-    await runner._tick_user({**user, "channel": "telegram", "channel_user_id": tg_chat_id})
+    await runner._tick_user({**user, "channel": "telegram", "channel_user_id": tg_chat_id}, runner._load_tasks())
 
     # Should have sent at least one message (one per task with actionable response)
     assert mock_bot.send_message.called
@@ -362,7 +362,7 @@ async def test_cooldown_skips_task(runner, mock_bot, mock_anth, tmp_db):
     for task_id in ("claim_status", "aging_drafts", "gmail_receipts"):
         storage.log_nudge(uid, hook=f"heartbeat_{task_id}", message_preview="prev")
 
-    await runner._tick_user({**user, "channel": "telegram", "channel_user_id": "7770000"})
+    await runner._tick_user({**user, "channel": "telegram", "channel_user_id": "7770000"}, runner._load_tasks())
 
     # Claude should not have been called (all tasks on cooldown)
     mock_anth.messages.create.assert_not_called()

@@ -2,9 +2,9 @@ tasks:
   - id: claim_status
     every: 24h
     prompt: |
-      Check if any submitted or for-approval claims changed status (approved/reimbursed/rejected).
-      If status changed since last check, tell the user concisely.
-      Reply HEARTBEAT_OK if nothing changed or no submitted claims.
+      Check the current status of the user's expense claims.
+      If any claims are currently approved or reimbursed and haven't been acknowledged, inform the user.
+      Reply HEARTBEAT_OK if all claims are in draft or for-approval state.
 
   - id: aging_drafts
     every: 12h
