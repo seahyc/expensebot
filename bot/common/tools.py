@@ -122,24 +122,25 @@ TOOLS = [
     {
         "name": "search_email_context",
         "description": (
-            "Search Gmail for emails related to a merchant or event around a given date. "
-            "Call this when the user asks a follow-up about what emails might explain a receipt, "
-            "or when they want to verify the business purpose of an expense."
+            "Search the user's Gmail. Use for any email-related question: "
+            "finding threads about a topic, checking if something was confirmed, "
+            "verifying a business purpose, or summarising recent email activity. "
+            "Not just for receipts — call whenever the user asks about their email."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "merchant": {
                     "type": "string",
-                    "description": "Merchant name to search for in email threads",
+                    "description": "Topic, sender, or merchant to search for",
                 },
                 "date_hint": {
                     "type": "string",
-                    "description": "Date of the receipt, e.g. '2026-04-15'",
+                    "description": "Date to search around, e.g. '2026-04-15'. Use today's date if not specified.",
                 },
                 "time_hint": {
                     "type": "string",
-                    "description": "Optional time of transaction, e.g. '14:30'",
+                    "description": "Optional time to narrow the search, e.g. '14:30'",
                 },
             },
             "required": ["merchant", "date_hint"],
@@ -148,15 +149,17 @@ TOOLS = [
     {
         "name": "search_calendar_context",
         "description": (
-            "Search Google Calendar for events near a given date and time. "
-            "Call this when the user asks about what meetings or events might explain a receipt."
+            "Search the user's Google Calendar. Use for any calendar question: "
+            "what meetings are coming up, what happened on a given day, "
+            "finding a specific event, or summarising the week ahead. "
+            "Not just for receipts — call whenever the user asks about their schedule."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "date_hint": {
                     "type": "string",
-                    "description": "Date to search around, e.g. '2026-04-15'",
+                    "description": "Date to search around, e.g. '2026-04-15'. Use today's date if not specified.",
                 },
                 "time_hint": {
                     "type": "string",
