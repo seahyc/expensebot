@@ -186,7 +186,7 @@ def load_user_md(_user: dict) -> str:
 def client_for(user: dict) -> OmniHRClient:
     access, refresh = storage.get_omnihr_tokens(user["id"])
     if not access or not refresh:
-        raise AuthError("Not paired — run /pair first")
+        raise AuthError("Not paired — run /connect_omnihr first")
     tokens = Tokens(
         access_token=access,
         refresh_token=refresh,
@@ -730,7 +730,7 @@ async def _do_list(
         try:
             data = await client.list_submissions(status_filters=filters, page_size=_LIST_FETCH_SIZE)
         except AuthError:
-            msg = "Session expired — run /pair to re-link."
+            msg = "Session expired — run /connect_omnihr to re-link."
             if is_callback:
                 await update.callback_query.message.reply_text(msg)
             else:
@@ -812,7 +812,7 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     u = storage.get_user_by_channel("telegram", str(update.effective_user.id))
     if not u or not u.get("access_jwt"):
-        await update.message.reply_text("Not paired yet — run /pair")
+        await update.message.reply_text("Not paired yet — run /connect_omnihr")
         return
     if not await _check_rate(update, u["id"], "list"):
         return
@@ -1025,7 +1025,7 @@ async def _do_file_draft(q: Any, chat_id: int, policy_id: int) -> None:
             await q._bot.send_document(chat_id=chat_id, document=buf, filename=pending.filename, caption=caption, parse_mode="Markdown", reply_markup=kb)
 
     except AuthError:
-        await _fail("Session expired — run /pair to re-link.")
+        await _fail("Session expired — run /connect_omnihr to re-link.")
     except Exception as e:
         log.exception("_do_file_draft failed")
         await _fail(f"Filing failed: {e}")
@@ -1128,7 +1128,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if not u or not u.get("access_jwt"):
-        await q.answer("Not paired — run /pair", show_alert=True)
+        await q.answer("Not paired — run /connect_omnihr", show_alert=True)
         return
 
     # Handle list filter callbacks: list:approved, list:draft, etc.
@@ -1181,7 +1181,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 await q.answer(f"Unknown action: {action}", show_alert=True)
     except AuthError:
-        await _reply("Session expired — run /pair to re-link.")
+        await _reply("Session expired — run /connect_omnihr to re-link.")
     except Exception as e:
         log.exception("callback failed")
         await _reply(f"Action failed: {e}")
@@ -2568,7 +2568,8 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("login", cmd_login))
     tg_app.add_handler(CommandHandler("whoami", cmd_whoami))
     tg_app.add_handler(CommandHandler("setkey", cmd_setkey))
-    tg_app.add_handler(CommandHandler("pair", cmd_pair))
+    tg_app.add_handler(CommandHandler("connect_omnihr", cmd_pair))
+    tg_app.add_handler(CommandHandler("pair", cmd_pair))  # legacy alias
     tg_app.add_handler(CommandHandler("list", cmd_list))
     tg_app.add_handler(CommandHandler("delete", cmd_delete))
     tg_app.add_handler(CommandHandler("submit", cmd_submit))
@@ -2615,7 +2616,7 @@ async def run() -> None:
         await tg_app.bot.set_my_commands([
             BotCommand("start", "Status & integrations"),
             BotCommand("login", "Connect your Claude AI"),
-            BotCommand("pair", "Link your OmniHR account"),
+            BotCommand("connect_omnihr", "Link your OmniHR account"),
             BotCommand("connect_google", "Connect Gmail & Calendar"),
             BotCommand("connect_telegram", "Read your Telegram messages"),
             BotCommand("connect_whatsapp", "Read your WhatsApp messages"),
