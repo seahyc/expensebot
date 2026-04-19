@@ -1,6 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Janai",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAthvZ07Ktd7bTU9G7mKN+Fdjr4g93qL5+JpXLkmgOYDPIc/o26PEhMKvRA9Pl6lXPuej4eeL9craQ8qh17TSGhDIhU1gCn0bvImVqb37ZcLKAWqiPp4T1C3v0MMbbkKIis1C2/M7QyuPRnD3Z8V5GVDhgYjowWMQM5j3culJQyuBuL2VKzX0ymsGZUt4FcZgKUlfsWGwbODZ3gSXETpvskBoRsnyIsoOxc4JP1nbw/kBrRrsZJmSt8488IgoKvW6uJ9Ef6dCbSX9X+faRkZh+DhoN4hTunMDeIXARo7iy7XxkkzUJY1JlYN2LbT1QpzGZz911KlDA/ceDvQUCZrhX2QIDAQAB",
   "version": "0.0.1",
   "description": "Bridges your OmniHR session to Janai — your expense-claim secretary on Telegram/Lark.",
   "permissions": ["cookies", "storage", "activeTab", "identity"],
