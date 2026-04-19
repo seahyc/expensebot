@@ -2709,6 +2709,11 @@ async function submitKey(){{
 
         try:
             async with httpx.AsyncClient() as client:
+                # Always clear any existing bridge session first so we get a fresh QR
+                try:
+                    await client.delete(f"{WHATSAPP_BRIDGE_URL}/session/{user_db_id}", timeout=5.0)
+                except Exception:
+                    pass
                 r = await client.post(
                     f"{WHATSAPP_BRIDGE_URL}/session/{user_db_id}",
                     timeout=10.0,
