@@ -16,3 +16,4 @@ build/
 *.pem
 extension/dist/
 tmp/
+.worktrees/
