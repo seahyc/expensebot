@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
 # Install build tools needed for native modules (better-sqlite3)
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache python3 make g++ git
 
 WORKDIR /app
 
