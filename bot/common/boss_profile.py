@@ -189,12 +189,12 @@ def _format_claims(claims: list[dict]) -> str:
 
 
 async def _bulk_gmail(*, user_id: int, since: datetime) -> list[str]:
-    """Fetch recent Gmail threads with broad expense-related queries."""
-    from .context_lookup import _get_valid_access_token
+    """Fetch recent Gmail threads across all connected Google accounts."""
+    from .context_lookup import _get_all_valid_access_tokens
     import httpx
 
-    access_token = await _get_valid_access_token(user_id)
-    if not access_token:
+    tokens = await _get_all_valid_access_tokens(user_id)
+    if not tokens:
         return []
 
     queries = [
@@ -207,107 +207,126 @@ async def _bulk_gmail(*, user_id: int, since: datetime) -> list[str]:
     after = since.strftime("%Y/%m/%d")
 
     async with httpx.AsyncClient() as client:
-        for q in queries:
-            try:
-                r = await client.get(
-                    "https://gmail.googleapis.com/gmail/v1/users/me/threads",
-                    params={"q": f"{q} after:{after}", "maxResults": 20},
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=6.0,
-                )
-                if r.status_code != 200:
-                    continue
-                for t in r.json().get("threads", []):
-                    tid = t.get("id", "")
-                    snippet = t.get("snippet", "")[:100]
-                    if tid and tid not in seen and snippet:
-                        seen.add(tid)
-                        results.append(snippet)
-            except Exception as e:
-                log.warning("_bulk_gmail query '%s' error: %s", q, e)
+        for _email, access_token in tokens:
+            for q in queries:
+                try:
+                    r = await client.get(
+                        "https://gmail.googleapis.com/gmail/v1/users/me/threads",
+                        params={"q": f"{q} after:{after}", "maxResults": 20},
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        timeout=6.0,
+                    )
+                    if r.status_code != 200:
+                        continue
+                    for t in r.json().get("threads", []):
+                        tid = t.get("id", "")
+                        snippet = t.get("snippet", "")[:100]
+                        if tid and tid not in seen and snippet:
+                            seen.add(tid)
+                            results.append(snippet)
+                except Exception as e:
+                    log.warning("_bulk_gmail query '%s' error: %s", q, e)
 
     return results
 
 
 async def _bulk_gcal(*, user_id: int, since: datetime, until: datetime) -> list[str]:
-    """Fetch calendar events over a wide window."""
-    from .context_lookup import _get_valid_access_token, _fmt_dt
+    """Fetch calendar events across all connected Google accounts."""
+    from .context_lookup import _get_all_valid_access_tokens, _fmt_dt
     import httpx
 
-    access_token = await _get_valid_access_token(user_id)
-    if not access_token:
+    tokens = await _get_all_valid_access_tokens(user_id)
+    if not tokens:
         return []
 
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-                params={
-                    "timeMin": _fmt_dt(since),
-                    "timeMax": _fmt_dt(until),
-                    "maxResults": 50,
-                    "orderBy": "startTime",
-                    "singleEvents": "true",
-                },
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=8.0,
-            )
-        if r.status_code != 200:
-            return []
-        events = r.json().get("items", [])
-        results = []
-        for ev in events:
-            summary = ev.get("summary") or "(no title)"
-            start = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date") or ""
-            if start:
-                try:
-                    dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                    start = dt.strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    start = start[:10]
-            results.append(f"{summary} @ {start}")
-        return results
-    except Exception as e:
-        log.warning("_bulk_gcal error: %s", e)
-        return []
+    results = []
+    seen: set[str] = set()
+
+    async with httpx.AsyncClient() as client:
+        for _email, access_token in tokens:
+            try:
+                r = await client.get(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    params={
+                        "timeMin": _fmt_dt(since),
+                        "timeMax": _fmt_dt(until),
+                        "maxResults": 50,
+                        "orderBy": "startTime",
+                        "singleEvents": "true",
+                    },
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=8.0,
+                )
+                if r.status_code != 200:
+                    continue
+                for ev in r.json().get("items", []):
+                    summary = ev.get("summary") or "(no title)"
+                    start = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date") or ""
+                    if start:
+                        try:
+                            dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                            start = dt.strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            start = start[:10]
+                    key = f"{summary}@{start}"
+                    if key not in seen:
+                        seen.add(key)
+                        results.append(f"{summary} @ {start}")
+            except Exception as e:
+                log.warning("_bulk_gcal error: %s", e)
+
+    return results
 
 
 async def _bulk_telegram(*, user_id: int, since: datetime) -> list[str]:
-    """Fetch recent expense-related Telegram messages using the stored session."""
+    """Fetch recent Telegram messages across all connected accounts."""
     from .. import storage
     from .telegram_reader import fetch_recent_messages
 
-    session_str = storage.get_telegram_session(user_id)
-    if not session_str:
+    accounts = storage.get_telegram_accounts(user_id)
+    if not accounts:
         return []
-    try:
-        return await fetch_recent_messages(session_str, since)
-    except Exception as e:
-        log.warning("_bulk_telegram error for user=%s: %s", user_id, e)
-        return []
+
+    all_msgs: list[str] = []
+    for acct in accounts:
+        session_str = acct.get("session_str")
+        if not session_str:
+            continue
+        try:
+            msgs = await fetch_recent_messages(session_str, since)
+            all_msgs.extend(msgs)
+        except Exception as e:
+            log.warning("_bulk_telegram error for phone=%s user=%s: %s", acct.get("phone"), user_id, e)
+
+    return all_msgs
 
 
 async def _bulk_whatsapp(*, user_id: int, since: datetime) -> list[str]:
-    """Fetch recent WhatsApp messages from the local bridge service."""
+    """Fetch recent WhatsApp messages across all connected accounts."""
     import httpx
     import os
-
     from .. import storage
 
-    bridge = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
-    if not storage.get_whatsapp_connected(user_id):
+    bridge = os.getenv("WHATSAPP_BRIDGE_URL", "http://whatsapp-bridge:3002")
+    accounts = storage.get_whatsapp_accounts(user_id)
+    if not accounts:
         return []
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                f"{bridge}/messages/{user_id}",
-                params={"since": int(since.timestamp())},
-                timeout=5.0,
-            )
-            if r.status_code != 200:
-                return []
-            msgs = r.json().get("messages", [])
-            return [m["text"][:120] for m in msgs[:60] if m.get("text")]
-    except Exception as e:
-        log.warning("_bulk_whatsapp error for user=%s: %s", user_id, e)
-        return []
+
+    all_msgs: list[str] = []
+    async with httpx.AsyncClient() as client:
+        for acct in accounts:
+            session_id = acct["session_id"]
+            try:
+                r = await client.get(
+                    f"{bridge}/messages/{session_id}",
+                    params={"since": int(since.timestamp())},
+                    timeout=5.0,
+                )
+                if r.status_code != 200:
+                    continue
+                msgs = r.json().get("messages", [])
+                all_msgs.extend(m["text"][:120] for m in msgs[:60] if m.get("text"))
+            except Exception as e:
+                log.warning("_bulk_whatsapp error for session=%s user=%s: %s", session_id, user_id, e)
+
+    return all_msgs
