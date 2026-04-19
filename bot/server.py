@@ -1802,6 +1802,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "parse"):
         return
     progress = await msg.reply_text("Leave it with me… 👀")
+    log.info("on_photo: processing receipt user=%s media=%s size=%d", u["id"], media_type, len(file_bytes))
 
     import hashlib
     sha = hashlib.sha256(file_bytes).hexdigest()
@@ -1817,121 +1818,126 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     tenant_md = load_tenant_md(u.get("tenant_id"))
     user_md = load_user_md(u)
 
-    # Quick recent-claims summary from OmniHR (parallel-ish — keep simple for now)
+    # Quick recent-claims summary from OmniHR — 5s cap, non-critical context
+    log.info("on_photo: fetching omnihr context user=%s", u["id"])
     async with client_for(u) as client:
         try:
-            recent = await client.list_submissions(page_size=10)
+            recent = await asyncio.wait_for(client.list_submissions(page_size=10), timeout=5.0)
             recent_summary = "\n".join(
                 f"- {r.get('receipt_date','?')} {r.get('amount_currency','?')} {r.get('amount','?')} "
                 f"({r.get('policy', {}).get('name','?')})"
                 for r in recent.get("results", [])[:10]
             ) or "(no recent claims)"
-        except Exception:
+        except (Exception, asyncio.TimeoutError):
             recent_summary = "(couldn't fetch recent claims)"
 
         try:
-            policies: list[PolicyEntry] = await get_policies(client, u.get("tenant_id") or "")
-        except Exception as _pe:
+            policies: list[PolicyEntry] = await asyncio.wait_for(
+                get_policies(client, u.get("tenant_id") or ""), timeout=5.0
+            )
+        except (Exception, asyncio.TimeoutError) as _pe:
             log.warning("policies fetch failed: %s", _pe)
             policies = []
 
-        # Parse — try Agent SDK first (subscription auth), fall back to direct API
-        parsed = None
-        agent_raw = None
-        active_trip = f"User hint: {user_note}" if user_note else None
+    log.info("on_photo: omnihr context done, starting parse user=%s", u["id"])
+
+    # Parse — try Agent SDK first (subscription auth), fall back to direct API
+    parsed = None
+    agent_raw = None
+    active_trip = f"User hint: {user_note}" if user_note else None
+    try:
+        agent_raw = await asyncio.wait_for(
+            parse_receipt_via_agent(
+                file_bytes=file_bytes,
+                media_type=media_type,
+                filename=filename,
+                tenant_md=tenant_md,
+                user_md=user_md,
+                recent_claims_summary=recent_summary,
+                active_trip=active_trip,
+            ),
+            timeout=30.0,
+        )
+    except (Exception, asyncio.TimeoutError) as e:
+        log.info("Agent SDK parse skipped: %s", e)
+
+    if agent_raw and agent_raw.get("is_receipt"):
+        # Convert agent_raw dict to ParsedReceipt
+        from .common.parser import _to_parsed_receipt
+        parsed = _to_parsed_receipt(agent_raw)
+    else:
+        # Fallback to direct Anthropic API
         try:
-            agent_raw = await asyncio.wait_for(
-                parse_receipt_via_agent(
-                    file_bytes=file_bytes,
-                    media_type=media_type,
-                    filename=filename,
-                    tenant_md=tenant_md,
-                    user_md=user_md,
-                    recent_claims_summary=recent_summary,
-                    active_trip=active_trip,
-                ),
-                timeout=30.0,
+            parsed = await parse_receipt(
+                anthropic=await anthropic_for(u),
+                file_bytes=file_bytes,
+                media_type=media_type,
+                tenant_md=tenant_md,
+                user_md=user_md,
+                recent_claims_summary=recent_summary,
+                active_trip=active_trip,
+                policies=policies,
             )
-        except (Exception, asyncio.TimeoutError) as e:
-            log.info("Agent SDK parse skipped: %s", e)
-
-        if agent_raw and agent_raw.get("is_receipt"):
-            # Convert agent_raw dict to ParsedReceipt
-            from .common.parser import _to_parsed_receipt
-            parsed = _to_parsed_receipt(agent_raw)
-        else:
-            # Fallback to direct Anthropic API
-            try:
-                parsed = await parse_receipt(
-                    anthropic=await anthropic_for(u),
-                    file_bytes=file_bytes,
-                    media_type=media_type,
-                    tenant_md=tenant_md,
-                    user_md=user_md,
-                    recent_claims_summary=recent_summary,
-                    active_trip=active_trip,
-                    policies=policies,
+        except RuntimeError as e:
+            if "No Anthropic key" in str(e):
+                await progress.edit_text(
+                    "No API key and Agent SDK unavailable.\n"
+                    "Either: /login (use Claude subscription) or /setkey sk-ant-…"
                 )
-            except RuntimeError as e:
-                if "No Anthropic key" in str(e):
-                    await progress.edit_text(
-                        "No API key and Agent SDK unavailable.\n"
-                        "Either: /login (use Claude subscription) or /setkey sk-ant-…"
-                    )
-                    return
-                raise
-            except Exception as e:
-                await progress.edit_text(f"Parse failed: {e}")
                 return
-
-        if not parsed.is_receipt:
-            await progress.edit_text("That doesn't look like a receipt — anything else?")
+            raise
+        except Exception as e:
+            await progress.edit_text(f"Parse failed: {e}")
             return
 
-        # Run triangulation (Gmail + Calendar) in parallel with a 2-second budget.
-        # This is best-effort — never block filing on it.
-        triangulation_md: str | None = None
-        if parsed.merchant and parsed.receipt_date:
-            try:
-                SGT = timezone(timedelta(hours=8))
-                from datetime import time as _time
-                receipt_dt = datetime.combine(parsed.receipt_date, _time(12, 0), tzinfo=SGT)
-                tri_result = await asyncio.wait_for(
-                    triangulate(
-                        merchant=parsed.merchant,
-                        dt=receipt_dt,
-                        receipt_type=_infer_receipt_type(parsed),
-                        user_id=u.get("id"),
-                    ),
-                    timeout=2.0,
-                )
-                triangulation_md = tri_result.as_markdown()
-            except asyncio.TimeoutError:
-                log.debug("triangulation timed out — proceeding without context")
-            except Exception as e:
-                log.warning("triangulation failed: %s", e)
+    if not parsed.is_receipt:
+        await progress.edit_text("That doesn't look like a receipt — anything else?")
+        return
 
-        # Store pending state and show confirmation / policy picker
-        chat_id = msg.chat_id
-        _pending_files[chat_id] = _PendingFile(
-            tg_user_id=str(msg.from_user.id),
-            u=u,
-            file_bytes=file_bytes,
-            media_type=media_type,
-            filename=filename,
-            sha=sha,
-            tg_file_id=tg_file_id,
-            tg_file_type=tg_file_type,
-            parsed=parsed,
-            policies=policies,
-            user_note=user_note,
-            triangulation_md=triangulation_md,
-        )
-        confirm_text, confirm_kb = _build_confirm_message(
-            parsed, policies, sha=sha, triangulation_md=triangulation_md
-        )
-        storage.log_message(u["id"], "out", confirm_text)
-        await progress.edit_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
+    # Run triangulation (Gmail + Calendar) in parallel with a 2-second budget.
+    # This is best-effort — never block filing on it.
+    triangulation_md: str | None = None
+    if parsed.merchant and parsed.receipt_date:
+        try:
+            SGT = timezone(timedelta(hours=8))
+            from datetime import time as _time
+            receipt_dt = datetime.combine(parsed.receipt_date, _time(12, 0), tzinfo=SGT)
+            tri_result = await asyncio.wait_for(
+                triangulate(
+                    merchant=parsed.merchant,
+                    dt=receipt_dt,
+                    receipt_type=_infer_receipt_type(parsed),
+                    user_id=u.get("id"),
+                ),
+                timeout=2.0,
+            )
+            triangulation_md = tri_result.as_markdown()
+        except asyncio.TimeoutError:
+            log.debug("triangulation timed out — proceeding without context")
+        except Exception as e:
+            log.warning("triangulation failed: %s", e)
+
+    # Store pending state and show confirmation / policy picker
+    chat_id = msg.chat_id
+    _pending_files[chat_id] = _PendingFile(
+        tg_user_id=str(msg.from_user.id),
+        u=u,
+        file_bytes=file_bytes,
+        media_type=media_type,
+        filename=filename,
+        sha=sha,
+        tg_file_id=tg_file_id,
+        tg_file_type=tg_file_type,
+        parsed=parsed,
+        policies=policies,
+        user_note=user_note,
+        triangulation_md=triangulation_md,
+    )
+    confirm_text, confirm_kb = _build_confirm_message(
+        parsed, policies, sha=sha, triangulation_md=triangulation_md
+    )
+    storage.log_message(u["id"], "out", confirm_text)
+    await progress.edit_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
 
 
 # ---------------------------------------------------------------------------
