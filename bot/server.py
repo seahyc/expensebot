@@ -11,7 +11,7 @@ Endpoints:
     GET  /  — short status page (handy for "is it up?")
 
 Telegram (long polling, no webhook needed):
-    /start     /setkey <key>      /pair      /list      /status <id>
+    /start     /setkey <key>      /connect_omnihr      /list      /status <id>
     /submit <id>     /trip <name>      /delete <id>
     photo / pdf — files a draft
 
@@ -2569,7 +2569,6 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("whoami", cmd_whoami))
     tg_app.add_handler(CommandHandler("setkey", cmd_setkey))
     tg_app.add_handler(CommandHandler("connect_omnihr", cmd_pair))
-    tg_app.add_handler(CommandHandler("pair", cmd_pair))  # legacy alias
     tg_app.add_handler(CommandHandler("list", cmd_list))
     tg_app.add_handler(CommandHandler("delete", cmd_delete))
     tg_app.add_handler(CommandHandler("submit", cmd_submit))

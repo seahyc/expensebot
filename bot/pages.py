@@ -135,7 +135,7 @@ def extension_page() -> str:
       It's at <code>&lt;your-company&gt;.omnihr.co</code> (e.g.
       <code>glints.omnihr.co</code>) — if your dashboard loads without a login
       prompt, you're good. Google SSO is fine.</li>
-    <li style="margin:8px 0">Send <code>/pair</code> to the bot. You'll get a 6-digit code.</li>
+    <li style="margin:8px 0">Send <code>/connect_omnihr</code> to the bot. You'll get a 6-digit code.</li>
     <li style="margin:8px 0">On that OmniHR tab, click the 💰 icon in Chrome's
       toolbar, paste the 6 digits, tap <strong>Pair</strong>.</li>
   </ol>
@@ -283,7 +283,7 @@ def landing_page() -> str:
     it's at <code>&lt;your-company&gt;.omnihr.co</code> (e.g.
     <code>glints.omnihr.co</code>). Then in
     <a href="{link}" target="_blank"><strong>{handle}</strong></a>
-    send <strong>/pair</strong> → you'll get a 6-digit code → click the 💰
+    send <strong>/connect_omnihr</strong> → you'll get a 6-digit code → click the 💰
     icon on your OmniHR tab → paste → tap <em>Pair</em>.</div>
   </div>
 
