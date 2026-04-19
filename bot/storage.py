@@ -672,6 +672,45 @@ def log_nudge(user_id: int, hook: str, message_preview: str) -> None:
         )
 
 
+# Alias used by heartbeat runner
+record_nudge = log_nudge
+
+
+def list_active_users() -> list[dict]:
+    """Return all users who have a valid OmniHR session (access_jwt not null).
+
+    'Active' here means paired — the access token may be stale (the refresh
+    sweeper handles re-minting), but the user has at least gone through the
+    pairing flow. We exclude users whose refresh token is already dead.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM users
+               WHERE access_jwt IS NOT NULL
+                 AND refresh_expires_at > ?""",
+            (now_iso,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def was_nudged_recently(user_id: int, hook: str, within_hours: float) -> bool:
+    """Return True if a nudge with this hook was sent to user within `within_hours` hours.
+
+    Uses datetime() normalisation on both sides (same reason as
+    aging_drafts_for_user — CURRENT_TIMESTAMP lacks a timezone offset).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=within_hours)).isoformat()
+    with db() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM nudges
+               WHERE user_id=? AND hook=?
+                 AND datetime(sent_at) > datetime(?)""",
+            (user_id, hook, cutoff),
+        ).fetchone()
+        return int(row["n"] or 0) > 0
+
+
 def log_message(
     user_id: int,
     direction: str,

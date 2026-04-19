@@ -2180,9 +2180,18 @@ async def run() -> None:
         nudge_sweeper_forever(notifier=notify_nudge)
     )
 
+    from .heartbeat import HeartbeatRunner
+    heartbeat = HeartbeatRunner(
+        telegram_bot=tg_app.bot,
+        anthropic_factory=anthropic_for,
+        omnihr_factory=client_for,
+    )
+    heartbeat.start()
+
     try:
         await server.serve()
     finally:
+        heartbeat.stop()
         await tg_app.updater.stop()
         await tg_app.stop()
         await tg_app.shutdown()

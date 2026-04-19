@@ -19,6 +19,7 @@ dependencies = [
   "pynacl>=1.5",
   "structlog>=24",
   "claude-agent-sdk>=0.1",
+  "apscheduler>=3.10",
 ]
 
 [project.optional-dependencies]
