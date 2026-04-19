@@ -943,6 +943,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         async with client_for(u) as client:
             if action == "submit":
                 await client.submit_draft(claim_id)
+                await _record_merchant_after_submit(client, u, claim_id)
                 await _reply(f"📤 Submitted *#{claim_id}*.")
                 try:
                     await q.edit_message_reply_markup(reply_markup=None)
@@ -988,6 +989,7 @@ async def cmd_submit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     async with client_for(u) as client:
         try:
             await client.submit_draft(sub_id)
+            await _record_merchant_after_submit(client, u, sub_id)
             await update.message.reply_text(
                 f"📤 Sent submit-action for #{sub_id}. (Action code is tentative — verify on dashboard.)"
             )
@@ -1040,6 +1042,27 @@ async def cmd_memories(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _record_merchant_after_submit(client, u: dict, submission_id: int) -> None:
+    """Best-effort: fetch the submitted claim and record the merchant pattern
+    for Janai's memory. Errors are swallowed — recording must never break
+    the submit flow."""
+    try:
+        claim = await client.get_submission(submission_id)
+    except Exception as e:
+        log.warning("get_submission fetch failed for #%s: %s", submission_id, e)
+        return
+    if not claim:
+        return
+    merchant = (claim.get("merchant") or "").strip()
+    policy_id = (claim.get("policy") or {}).get("id") or ""
+    sub_cat = (claim.get("sub_category") or {}).get("name")
+    if merchant and policy_id:
+        try:
+            storage.record_merchant_choice(u["id"], merchant, str(policy_id), sub_cat)
+        except Exception:
+            log.exception("record_merchant_choice failed for user=%s", u["id"])
+
+
 async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_type: str = "", filename: str = ""):
     """Build a tool executor closure for the agent, bound to this user + file."""
 
@@ -1086,20 +1109,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             cid = tool_input["claim_id"]
             async with client_for(u) as client:
                 await client.submit_draft(cid)
-                # Fetch the submitted claim so we can record the merchant pattern.
-                try:
-                    claim = await client.get_submission(cid)
-                    if claim:
-                        merchant = (claim.get("merchant") or "").strip()
-                        policy_id = (claim.get("policy") or {}).get("id") or ""
-                        sub_cat = (claim.get("sub_category") or {}).get("name")
-                        if merchant and policy_id:
-                            storage.record_merchant_choice(
-                                u["id"], merchant, str(policy_id), sub_cat
-                            )
-                except Exception as e:
-                    # Recording is best-effort — don't fail the submit.
-                    log.warning("record_merchant_choice failed for #%s: %s", cid, e)
+                await _record_merchant_after_submit(client, u, cid)
             return f"Submitted #{cid} for approval."
 
         elif tool_name == "delete_claim":

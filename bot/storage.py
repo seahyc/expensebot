@@ -735,7 +735,8 @@ def record_merchant_choice(
 
 
 def get_merchant_history(user_id: int, merchant_normalized: str) -> list[dict]:
-    """Return all (policy, sub_cat, count) rows for this merchant, most-filed first."""
+    """Return all (policy, sub_cat, count) rows for this merchant, most-filed first.
+    sub_category is '' (never None) — see record_merchant_choice's NULL coercion."""
     with db() as conn:
         rows = conn.execute(
             """SELECT policy_id, sub_category, count, last_seen
@@ -748,15 +749,17 @@ def get_merchant_history(user_id: int, merchant_normalized: str) -> list[dict]:
 
 
 def top_merchants(user_id: int, limit: int = 20) -> list[dict]:
-    """Top merchants by total fills across all classifications.
-    Used for the context block so Janai can eyeball the pattern."""
+    """Top merchants by fill count across all classifications.
+    Used for the context block so Janai can eyeball the pattern.
+
+    Note: sub_category is '' (never None) for rows stored without one —
+    record_merchant_choice coerces NULL to empty string so ON CONFLICT
+    dedups correctly."""
     with db() as conn:
         rows = conn.execute(
-            """SELECT merchant_display AS merchant,
-                      policy_id, sub_category, SUM(count) AS count
+            """SELECT merchant_display AS merchant, policy_id, sub_category, count
                FROM merchant_choices
                WHERE user_id=?
-               GROUP BY merchant_normalized, policy_id, sub_category
                ORDER BY count DESC
                LIMIT ?""",
             (user_id, limit),
