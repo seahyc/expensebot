@@ -2445,9 +2445,19 @@ async function submitKey(){{
                 )
             if r.status_code != 200:
                 raise HTTPException(status_code=502, detail="Bridge error")
-            return r.json()
+            data = r.json()
         except httpx.RequestError as e:
             raise HTTPException(status_code=503, detail=f"WhatsApp bridge unreachable: {e}")
+
+        # Persist connected state so /extension/status reflects it immediately
+        if data.get("connected") and not storage.get_whatsapp_connected(user_db_id):
+            phone = data.get("phone") or ""
+            storage.set_whatsapp_connected(user_db_id, phone)
+            user = storage.get_user(user_db_id)
+            if tg_app and user:
+                asyncio.create_task(_build_boss_profile_bg(user, tg_app))
+
+        return data
 
     @app.get("/extension/whatsapp-status")
     async def extension_whatsapp_status(pairing_code: str, request: Request) -> dict:
