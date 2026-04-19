@@ -152,6 +152,9 @@ async def fetch_recent_messages(
         for dialog in dialogs:
             if len(results) >= max_results:
                 break
+            # Skip bot chats — they flood results with echoes
+            if getattr(dialog.entity, "bot", False):
+                continue
             try:
                 async for msg in client.iter_messages(dialog.entity, limit=max_per_dialog, offset_date=None):
                     if msg.date and msg.date.replace(tzinfo=timezone.utc) < since:
