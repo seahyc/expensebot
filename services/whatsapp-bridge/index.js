@@ -13,7 +13,6 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   isJidBroadcast,
-  makeInMemoryStore,
 } = require("@whiskeysockets/baileys");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -78,10 +77,9 @@ const sessions = new Map();
 
 function getOrCreateSessionState(sessionId) {
   if (!sessions.has(sessionId)) {
-    const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
     sessions.set(sessionId, {
       socket: null,
-      store,
+      knownJids: new Set(), // accumulate chat JIDs from chats.upsert
       qr: null,
       connected: false,
       phone: null,
@@ -164,9 +162,6 @@ async function startSession(sessionId) {
 
   state.socket = sock;
   state.reconnecting = false;
-
-  // Bind in-memory store so it tracks chats, contacts, messages
-  state.store.bind(sock.ev);
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -259,21 +254,20 @@ async function startSession(sessionId) {
     storeMessages(messages, "notify");
   });
 
-  // chats.upsert fires as chats arrive — trigger backfill once we have a good list
-  let backfillScheduled = false;
+  // chats.upsert fires as chat list arrives — accumulate JIDs, backfill once after 10s
+  let backfillTimer = null;
   sock.ev.on("chats.upsert", (chats) => {
-    if (backfillScheduled) return;
-    backfillScheduled = true;
-    // Wait 8s for more chats to accumulate before backfilling
-    setTimeout(() => {
-      const allJids = Object.keys(state.store.chats.all ? state.store.chats.all() : {});
-      const fromEvent = chats.map((c) => c.id).filter(Boolean);
-      const jids = allJids.length > 0 ? allJids : fromEvent;
+    for (const c of chats) {
+      if (c.id) state.knownJids.add(c.id);
+    }
+    if (backfillTimer) clearTimeout(backfillTimer);
+    backfillTimer = setTimeout(() => {
+      const jids = [...state.knownJids];
       log.info({ sessionId, count: jids.length }, "chats.upsert: triggering history backfill");
       syncChatsHistory(sessionId, jids).catch((e) =>
         log.warn({ sessionId, err: e.message }, "syncChatsHistory error")
       );
-    }, 8000);
+    }, 10000);
   });
 }
 
