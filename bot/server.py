@@ -78,6 +78,7 @@ TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+WHATSAPP_BRIDGE_URL = os.environ.get("WHATSAPP_BRIDGE_URL", "http://whatsapp-bridge:3002")
 
 REPO_ROOT = Path(__file__).parent.parent
 TENANTS_DIR = REPO_ROOT / "tenants"
@@ -1465,21 +1466,54 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
 
         elif tool_name == "get_whatsapp_messages":
             days = int(tool_input.get("days", 7))
-            if not u.get("whatsapp_connected"):
+            wa_accounts = storage.get_whatsapp_accounts(u["id"])
+            if not wa_accounts:
                 return "WhatsApp is not connected. Ask the user to run /connect_whatsapp."
-            from .common.boss_profile import _bulk_whatsapp
+            # Ensure sessions are live before fetching
+            try:
+                async with httpx.AsyncClient() as _hc:
+                    for _acct in wa_accounts:
+                        sid = _acct["session_id"]
+                        st = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/status/{sid}", timeout=3.0)
+                        if st.status_code == 200 and not st.json().get("connected"):
+                            await _hc.post(f"{WHATSAPP_BRIDGE_URL}/session/{sid}", timeout=5.0)
+            except Exception:
+                pass
             since = datetime.now(timezone.utc) - timedelta(days=days)
-            msgs = await asyncio.wait_for(_bulk_whatsapp(user_id=u["id"], since=since), timeout=10.0)
-            return "\n".join(msgs) if msgs else f"No WhatsApp messages found in the last {days} days."
+            from .common.boss_profile import _bulk_whatsapp
+            msgs = await asyncio.wait_for(_bulk_whatsapp(user_id=u["id"], since=since), timeout=15.0)
+            if not msgs:
+                return (
+                    f"No WhatsApp messages stored for the last {days} days. "
+                    "The bridge only captures messages received while connected — "
+                    "messages that arrived before the bridge was running won't appear."
+                )
+            return "\n".join(msgs)
 
         elif tool_name == "get_telegram_messages":
             days = int(tool_input.get("days", 7))
-            if not u.get("telegram_session"):
+            tg_accounts = storage.get_telegram_accounts(u["id"])
+            if not tg_accounts:
                 return "Telegram is not connected. Ask the user to run /connect_telegram."
-            from .common.boss_profile import _bulk_telegram
             since = datetime.now(timezone.utc) - timedelta(days=days)
-            msgs = await asyncio.wait_for(_bulk_telegram(user_id=u["id"], since=since), timeout=10.0)
-            return "\n".join(msgs) if msgs else f"No Telegram messages found in the last {days} days."
+            from .common.telegram_reader import fetch_recent_messages as _tg_fetch
+            all_msgs: list[str] = []
+            for _acct in tg_accounts:
+                sess = _acct.get("session_str")
+                if not sess:
+                    continue
+                try:
+                    # keywords=[] means no filter — return all messages, not just expense-related
+                    msgs = await asyncio.wait_for(
+                        _tg_fetch(sess, since, keywords=[]),
+                        timeout=25.0,
+                    )
+                    all_msgs.extend(msgs)
+                except asyncio.TimeoutError:
+                    all_msgs.append("(Telegram fetch timed out — try again)")
+                except Exception as e:
+                    all_msgs.append(f"(Telegram error: {e})")
+            return "\n".join(all_msgs) if all_msgs else f"No Telegram messages found in the last {days} days."
 
         elif tool_name == "get_omnihr_context":
             tenant_md = load_tenant_md(u.get("tenant_id"))
@@ -2479,8 +2513,6 @@ async function submitKey(){{
     # WhatsApp bridge endpoints
     # -----------------------------------------------------------------------
 
-    WHATSAPP_BRIDGE_URL = os.environ.get("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
-
     @app.post("/extension/whatsapp-init")
     async def extension_whatsapp_init(p: dict[str, Any], request: Request) -> dict:
         client_ip = (request.client.host if request.client else "unknown") or "unknown"
@@ -2612,6 +2644,26 @@ async function submitKey(){{
 # Background: boss profile builder
 # ---------------------------------------------------------------------------
 
+async def _reconnect_whatsapp_sessions() -> None:
+    """On startup, reconnect all WhatsApp sessions that were active before restart."""
+    await asyncio.sleep(3)  # let the bridge finish initializing
+    try:
+        all_users = storage.get_all_users_with_whatsapp()
+        if not all_users:
+            return
+        async with httpx.AsyncClient() as client:
+            for user_id in all_users:
+                for acct in storage.get_whatsapp_accounts(user_id):
+                    sid = acct["session_id"]
+                    try:
+                        r = await client.post(f"{WHATSAPP_BRIDGE_URL}/session/{sid}", timeout=10.0)
+                        log.info("wa reconnect user=%s session=%s status=%s", user_id, sid, r.status_code)
+                    except Exception as e:
+                        log.warning("wa reconnect failed user=%s session=%s: %s", user_id, sid, e)
+    except Exception as e:
+        log.warning("_reconnect_whatsapp_sessions error: %s", e)
+
+
 async def _build_boss_profile_bg(user: dict, tg_app) -> None:
     """Background task: fetch all claims + Gmail + Calendar, condense into boss profile."""
     user_id = user["id"]
@@ -2722,6 +2774,9 @@ async def run() -> None:
         ])
     except Exception:
         log.exception("could not set telegram command menu")
+
+    # Reconnect any WhatsApp sessions that were active before restart
+    asyncio.create_task(_reconnect_whatsapp_sessions())
 
     await tg_app.start()
     polling_task = asyncio.create_task(

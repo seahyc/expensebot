@@ -1126,3 +1126,20 @@ def remove_whatsapp_account(user_id: int, session_id: str) -> None:
     if remaining == 0:
         with db() as conn:
             conn.execute("UPDATE users SET whatsapp_connected=0, whatsapp_phone=NULL WHERE id=?", (user_id,))
+
+
+def get_all_users_with_whatsapp() -> list[int]:
+    """Return user_ids that have at least one connected WhatsApp account."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT user_id FROM whatsapp_accounts"
+        ).fetchall()
+    ids = [r["user_id"] for r in rows]
+    if not ids:
+        # Fallback: legacy users table
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT id FROM users WHERE whatsapp_connected=1"
+            ).fetchall()
+        ids = [r["id"] for r in rows]
+    return ids

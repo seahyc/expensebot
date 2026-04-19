@@ -119,38 +119,41 @@ async def fetch_recent_messages(
     session_str: str,
     since: datetime,
     keywords: list[str] | None = None,
+    max_dialogs: int = 20,
+    max_per_dialog: int = 100,
+    max_results: int = 60,
 ) -> list[str]:
-    """Connect with an existing StringSession, fetch recent messages matching
-    expense keywords, then disconnect.
+    """Connect with an existing StringSession, fetch recent messages, then disconnect.
 
     Args:
         session_str: A saved Telethon StringSession string.
         since: Earliest datetime for messages (timezone-aware UTC recommended).
-        keywords: If given, only messages containing at least one keyword
-                  (case-insensitive) are included. Defaults to _DEFAULT_KEYWORDS.
+        keywords: Filter messages by keywords. None = expense keywords. [] = no filter (all msgs).
+        max_dialogs: How many dialogs to scan.
+        max_per_dialog: Max messages to read per dialog.
+        max_results: Total result cap.
 
     Returns:
-        Up to 60 text snippets like "from {name}: {text[:120]}".
+        Up to max_results text snippets like "from {name}: {text[:120]}".
     """
-    kws = [k.lower() for k in (keywords if keywords is not None else _DEFAULT_KEYWORDS)]
+    kws = keywords if keywords is not None else [k.lower() for k in _DEFAULT_KEYWORDS]
+    kws = [k.lower() for k in kws]
 
     client = _make_client(session_str)
     results: list[str] = []
 
-    # Ensure since is timezone-aware for comparison.
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
 
     try:
         await client.connect()
 
-        dialogs = await client.get_dialogs(limit=20)
+        dialogs = await client.get_dialogs(limit=max_dialogs)
         for dialog in dialogs:
-            if len(results) >= 60:
+            if len(results) >= max_results:
                 break
             try:
-                async for msg in client.iter_messages(dialog.entity, limit=100, offset_date=None):
-                    # Stop iterating once we go past the `since` window.
+                async for msg in client.iter_messages(dialog.entity, limit=max_per_dialog, offset_date=None):
                     if msg.date and msg.date.replace(tzinfo=timezone.utc) < since:
                         break
 
@@ -158,21 +161,16 @@ async def fetch_recent_messages(
                     if not text:
                         continue
 
-                    # Keyword filter.
-                    text_lower = text.lower()
-                    if kws and not any(kw in text_lower for kw in kws):
+                    if kws and not any(kw in text.lower() for kw in kws):
                         continue
 
-                    # Build a friendly "from X: ..." snippet.
                     try:
                         name = dialog.name or "unknown"
                     except Exception:
                         name = "unknown"
 
-                    snippet = f"from {name}: {text[:120]}"
-                    results.append(snippet)
-
-                    if len(results) >= 60:
+                    results.append(f"from {name}: {text[:120]}")
+                    if len(results) >= max_results:
                         break
             except Exception as e:
                 log.debug("telegram_reader: error reading dialog %s: %s", dialog.name, e)
