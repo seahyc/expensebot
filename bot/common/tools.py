@@ -125,25 +125,25 @@ TOOLS = [
             "Search the user's Gmail. Use for any email-related question: "
             "finding threads about a topic, checking if something was confirmed, "
             "verifying a business purpose, or summarising recent email activity. "
-            "Not just for receipts — call whenever the user asks about their email."
+            "All params optional — call with no params to get recent emails."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "merchant": {
                     "type": "string",
-                    "description": "Topic, sender, or merchant to search for",
+                    "description": "Topic, sender, or merchant to search for. Omit for recent emails.",
                 },
                 "date_hint": {
                     "type": "string",
-                    "description": "Date to search around, e.g. '2026-04-15'. Use today's date if not specified.",
+                    "description": "Date to search around, e.g. '2026-04-15'. Defaults to today.",
                 },
                 "time_hint": {
                     "type": "string",
                     "description": "Optional time to narrow the search, e.g. '14:30'",
                 },
             },
-            "required": ["merchant", "date_hint"],
+            "required": [],
         },
     },
     {
@@ -152,21 +152,55 @@ TOOLS = [
             "Search the user's Google Calendar. Use for any calendar question: "
             "what meetings are coming up, what happened on a given day, "
             "finding a specific event, or summarising the week ahead. "
-            "Not just for receipts — call whenever the user asks about their schedule."
+            "All params optional — call with no params to get the next 7 days."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "date_hint": {
                     "type": "string",
-                    "description": "Date to search around, e.g. '2026-04-15'. Use today's date if not specified.",
+                    "description": "Date to search around, e.g. '2026-04-15'. Defaults to today.",
                 },
                 "time_hint": {
                     "type": "string",
-                    "description": "Optional time to narrow the search, e.g. '14:30'",
+                    "description": "Time for a specific event lookup, e.g. '14:30'. Omit for broad search.",
                 },
             },
-            "required": ["date_hint"],
+            "required": [],
+        },
+    },
+    {
+        "name": "get_whatsapp_messages",
+        "description": (
+            "Read the user's recent WhatsApp messages. Call whenever the user asks about "
+            "their WhatsApp chats, messages, or asks you to summarise WhatsApp activity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to fetch. Default: 7.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_telegram_messages",
+        "description": (
+            "Read the user's recent Telegram messages. Call whenever the user asks about "
+            "their Telegram chats, messages, or asks you to summarise Telegram activity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to fetch. Default: 7.",
+                },
+            },
+            "required": [],
         },
     },
     {

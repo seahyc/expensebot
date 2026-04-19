@@ -1424,22 +1424,51 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             merchant = tool_input.get("merchant", "")
             date_hint = tool_input.get("date_hint", "")
             time_hint = tool_input.get("time_hint", "")
-            try:
-                dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
-            except ValueError:
-                dt = datetime.now()
-            results = await asyncio.wait_for(context_lookup.gmail_context(merchant, dt, user_id=u.get("id")), timeout=5.0)
+            now_sgt = datetime.now(timezone(timedelta(hours=8)))
+            if date_hint:
+                try:
+                    dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
+                except ValueError:
+                    dt = now_sgt
+            else:
+                dt = now_sgt
+            results = await asyncio.wait_for(context_lookup.gmail_context(merchant, dt, user_id=u.get("id")), timeout=8.0)
             return "\n".join(results) if results else "No relevant emails found."
 
         elif tool_name == "search_calendar_context":
             date_hint = tool_input.get("date_hint", "")
             time_hint = tool_input.get("time_hint", "")
-            try:
-                dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
-            except ValueError:
-                dt = datetime.now()
-            results = await asyncio.wait_for(context_lookup.gcal_context(dt, user_id=u.get("id")), timeout=5.0)
-            return "\n".join(results) if results else "No calendar events found near this time."
+            now_sgt = datetime.now(timezone(timedelta(hours=8)))
+            broad = not time_hint  # no specific time = broad upcoming search
+            if date_hint:
+                try:
+                    dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+                except ValueError:
+                    dt = now_sgt
+            else:
+                dt = now_sgt
+            results = await asyncio.wait_for(context_lookup.gcal_context(dt, user_id=u.get("id"), broad=broad), timeout=8.0)
+            return "\n".join(results) if results else "No calendar events found."
+
+        elif tool_name == "get_whatsapp_messages":
+            days = int(tool_input.get("days", 7))
+            if not u.get("whatsapp_connected"):
+                return "WhatsApp is not connected. Ask the user to run /connect_whatsapp."
+            from .common.boss_profile import _bulk_whatsapp
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            msgs = await asyncio.wait_for(_bulk_whatsapp(user_id=u["id"], since=since), timeout=10.0)
+            return "\n".join(msgs) if msgs else f"No WhatsApp messages found in the last {days} days."
+
+        elif tool_name == "get_telegram_messages":
+            days = int(tool_input.get("days", 7))
+            if not u.get("telegram_session"):
+                return "Telegram is not connected. Ask the user to run /connect_telegram."
+            from .common.boss_profile import _bulk_telegram
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            msgs = await asyncio.wait_for(_bulk_telegram(user_id=u["id"], since=since), timeout=10.0)
+            return "\n".join(msgs) if msgs else f"No Telegram messages found in the last {days} days."
 
         elif tool_name == "get_omnihr_context":
             tenant_md = load_tenant_md(u.get("tenant_id"))

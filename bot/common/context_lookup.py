@@ -113,27 +113,34 @@ async def gmail_context(
     user_id: int | None = None,
     window_days: int = 3,
 ) -> list[str]:
-    """Search Gmail for threads mentioning the merchant near the receipt date."""
-    if not merchant or user_id is None:
+    """Search Gmail for threads. If merchant is empty, returns recent emails from the last week."""
+    if user_id is None:
         return []
 
     access_token = await _get_valid_access_token(user_id)
     if not access_token:
         return []
 
-    after = dt - timedelta(days=window_days)
-    before = dt + timedelta(days=window_days)
-    query = (
-        f"{merchant} "
-        f"after:{_fmt_date_for_gmail(after)} "
-        f"before:{_fmt_date_for_gmail(before)}"
-    )
+    if merchant:
+        after = dt - timedelta(days=window_days)
+        before = dt + timedelta(days=window_days)
+        query = (
+            f"{merchant} "
+            f"after:{_fmt_date_for_gmail(after)} "
+            f"before:{_fmt_date_for_gmail(before)}"
+        )
+        max_results = 5
+    else:
+        # Broad recent search: last 7 days, no keyword filter
+        after = dt - timedelta(days=7)
+        query = f"after:{_fmt_date_for_gmail(after)}"
+        max_results = 10
 
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(
                 "https://gmail.googleapis.com/gmail/v1/users/me/threads",
-                params={"q": query, "maxResults": 5},
+                params={"q": query, "maxResults": max_results},
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=_API_TIMEOUT,
             )
@@ -144,7 +151,7 @@ async def gmail_context(
         data = r.json()
         threads = data.get("threads", [])
         results: list[str] = []
-        for t in threads[:5]:
+        for t in threads[:max_results]:
             snippet = t.get("snippet", "")
             if snippet:
                 results.append(snippet[:120])
@@ -158,8 +165,9 @@ async def gcal_context(
     dt: datetime,
     user_id: int | None = None,
     window_hours: float = 2.0,
+    broad: bool = False,
 ) -> list[str]:
-    """Fetch Google Calendar events within ±window_hours of the receipt time."""
+    """Fetch Google Calendar events. If broad=True (no specific time), fetches next 7 days."""
     if user_id is None:
         return []
 
@@ -169,17 +177,23 @@ async def gcal_context(
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    time_min = _fmt_dt(dt - timedelta(hours=window_hours))
-    time_max = _fmt_dt(dt + timedelta(hours=window_hours))
+    if broad:
+        # For general "what's upcoming?" queries: start of today → +7 days
+        time_min = _fmt_dt(dt.replace(hour=0, minute=0, second=0, microsecond=0))
+        time_max = _fmt_dt(dt + timedelta(days=7))
+    else:
+        time_min = _fmt_dt(dt - timedelta(hours=window_hours))
+        time_max = _fmt_dt(dt + timedelta(hours=window_hours))
 
     try:
+        max_results = 20 if broad else 5
         async with httpx.AsyncClient() as client:
             r = await client.get(
                 "https://www.googleapis.com/calendar/v3/calendars/primary/events",
                 params={
                     "timeMin": time_min,
                     "timeMax": time_max,
-                    "maxResults": 5,
+                    "maxResults": max_results,
                     "orderBy": "startTime",
                     "singleEvents": "true",
                 },
@@ -193,7 +207,7 @@ async def gcal_context(
         data = r.json()
         events = data.get("items", [])
         results: list[str] = []
-        for ev in events[:5]:
+        for ev in events[:max_results]:
             summary = ev.get("summary") or "(no title)"
             start = ev.get("start", {})
             start_time = start.get("dateTime") or start.get("date") or ""
