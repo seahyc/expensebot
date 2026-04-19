@@ -8,13 +8,18 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: oracle.seahyingcong.com
-          username: opc
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            cd ~/expensebot
-            git pull
-            docker compose up -d --build
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat >> ~/.ssh/known_hosts <<'EOF'
+          oracle.seahyingcong.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDK00f9HW9Jg3hs/dWKgNbaFfn4qQstR5YqKW7HsK1bM7lSu/Qiz1De4sCksIaidSyRVDl18kTX2A8IkF3a5ThNOcV/HkUM2FQddokyGvMDGJ/WaAkqUSXgI+LzhdtTge5iv5AD/8I58Q77zuFT+w4SxedGJ7CtnbGxT5xjj7BIuGukDCV3w4e/XUK6QayV0qcyJm+/ldVnKilQzFrcI65uw4SHlMXNTZvhlnaNhvQ8ni15LnJfOnhhWZj6kd9t0XFofnWF/keko9a8GcqW4PJd/7IEVvYsc6U0uECNuZ9ffFbn1Y8Ef+OmYPzv9NltzIUqmDjT3X/yMwgYymvzGf7zqOIE4jFIzqacWRTBDQecEBztU2sHpbwb4ci8kAVfkw0BP8B0iENPCudELOhwb8GrVGIHGX9mBpBcQbLwAMCyCe4kamgBeWWAfOaeXvn1Hp6L1L/Z5Bxn4ZE7oBK1PILS7IB6JY3KaOZCQaUiUnzzvp6i+PMekKEyygD6fSG+Eh8=
+          oracle.seahyingcong.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBA9g9aAwCu61eEwZo4CLwNQEo7enJyfobAvZV0YKHZQffP0JFKV2Vag8j3oXKwpT1NGLRLWUL5Hjprc9i5wc7p0=
+          oracle.seahyingcong.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM1oVOXOMLhkqigZq38Xn/LjEEylYPIDBBhbcRbSsPaa
+          EOF
+
+      - name: Deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key opc@oracle.seahyingcong.com \
+            'cd ~/expensebot && git pull && docker compose up -d --build'
