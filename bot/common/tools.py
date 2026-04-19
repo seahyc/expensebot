@@ -120,19 +120,36 @@ TOOLS = [
         },
     },
     {
+        "name": "list_recent_emails",
+        "description": (
+            "Fetch the user's recent Gmail inbox — latest emails, no search query needed. "
+            "Use this when the user asks for 'my emails', 'inbox', 'last N emails', "
+            "'any recent emails', or a general email summary. Returns the most recent threads."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to look. Default: 7.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "search_email_context",
         "description": (
-            "Search the user's Gmail. Use for any email-related question: "
-            "finding threads about a topic, checking if something was confirmed, "
-            "verifying a business purpose, or summarising recent email activity. "
-            "All params optional — call with no params to get recent emails."
+            "Search the user's Gmail for a specific topic, sender, or merchant. "
+            "Use when looking for emails about something specific — a receipt, a person, "
+            "a company, a project. Not for general inbox listing (use list_recent_emails for that)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "merchant": {
                     "type": "string",
-                    "description": "Topic, sender, or merchant to search for. Omit for recent emails.",
+                    "description": "Topic, sender, or merchant to search for",
                 },
                 "date_hint": {
                     "type": "string",
@@ -143,30 +160,48 @@ TOOLS = [
                     "description": "Optional time to narrow the search, e.g. '14:30'",
                 },
             },
+            "required": ["merchant"],
+        },
+    },
+    {
+        "name": "list_upcoming_events",
+        "description": (
+            "Fetch the user's upcoming Google Calendar events — no search needed. "
+            "Use when the user asks 'what's on my calendar', 'my schedule', 'what's next', "
+            "'anything this week', or wants a general calendar overview."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "How many days ahead to look. Default: 7.",
+                },
+            },
             "required": [],
         },
     },
     {
         "name": "search_calendar_context",
         "description": (
-            "Search the user's Google Calendar. Use for any calendar question: "
-            "what meetings are coming up, what happened on a given day, "
-            "finding a specific event, or summarising the week ahead. "
-            "All params optional — call with no params to get the next 7 days."
+            "Search the user's Google Calendar for events near a specific date and time. "
+            "Use when looking for what was happening at a particular moment — e.g. "
+            "'what meeting did I have at 2pm on Tuesday'. For general schedule overview, "
+            "use list_upcoming_events instead."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "date_hint": {
                     "type": "string",
-                    "description": "Date to search around, e.g. '2026-04-15'. Defaults to today.",
+                    "description": "Date to search around, e.g. '2026-04-15'.",
                 },
                 "time_hint": {
                     "type": "string",
-                    "description": "Time for a specific event lookup, e.g. '14:30'. Omit for broad search.",
+                    "description": "Time for event lookup, e.g. '14:30'.",
                 },
             },
-            "required": [],
+            "required": ["date_hint"],
         },
     },
     {

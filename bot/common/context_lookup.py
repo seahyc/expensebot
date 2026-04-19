@@ -178,9 +178,10 @@ async def gcal_context(
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     if broad:
-        # For general "what's upcoming?" queries: start of today → +7 days
+        # For general "what's upcoming?" queries: start of today → +window_hours (treated as days*24)
+        days = max(1, int(window_hours / 24)) if window_hours > 24 else 7
         time_min = _fmt_dt(dt.replace(hour=0, minute=0, second=0, microsecond=0))
-        time_max = _fmt_dt(dt + timedelta(days=7))
+        time_max = _fmt_dt(dt + timedelta(days=days))
     else:
         time_min = _fmt_dt(dt - timedelta(hours=window_hours))
         time_max = _fmt_dt(dt + timedelta(hours=window_hours))

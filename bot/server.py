@@ -1420,6 +1420,18 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                 )
             return f"Claims ({len(rows)} total):\n" + "\n".join(lines)
 
+        elif tool_name == "list_recent_emails":
+            days = int(tool_input.get("days", 7))
+            now_sgt = datetime.now(timezone(timedelta(hours=8)))
+            results = await asyncio.wait_for(context_lookup.gmail_context("", now_sgt, user_id=u.get("id"), window_days=days), timeout=8.0)
+            return "\n".join(results) if results else f"No emails found in the last {days} days."
+
+        elif tool_name == "list_upcoming_events":
+            days = int(tool_input.get("days", 7))
+            now_sgt = datetime.now(timezone(timedelta(hours=8)))
+            results = await asyncio.wait_for(context_lookup.gcal_context(now_sgt, user_id=u.get("id"), broad=True, window_hours=days * 24), timeout=8.0)
+            return "\n".join(results) if results else f"No upcoming events in the next {days} days."
+
         elif tool_name == "search_email_context":
             merchant = tool_input.get("merchant", "")
             date_hint = tool_input.get("date_hint", "")
@@ -1439,7 +1451,6 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             date_hint = tool_input.get("date_hint", "")
             time_hint = tool_input.get("time_hint", "")
             now_sgt = datetime.now(timezone(timedelta(hours=8)))
-            broad = not time_hint  # no specific time = broad upcoming search
             if date_hint:
                 try:
                     dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
@@ -1449,8 +1460,8 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     dt = now_sgt
             else:
                 dt = now_sgt
-            results = await asyncio.wait_for(context_lookup.gcal_context(dt, user_id=u.get("id"), broad=broad), timeout=8.0)
-            return "\n".join(results) if results else "No calendar events found."
+            results = await asyncio.wait_for(context_lookup.gcal_context(dt, user_id=u.get("id"), broad=False), timeout=8.0)
+            return "\n".join(results) if results else "No calendar events found near that time."
 
         elif tool_name == "get_whatsapp_messages":
             days = int(tool_input.get("days", 7))
