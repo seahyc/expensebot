@@ -25,12 +25,12 @@ services:
       dockerfile: Dockerfile
     container_name: whatsapp-bridge
     ports:
-      - "3001:3001"
+      - "3002:3002"
     volumes:
       - ./data/whatsapp-auth:/app/auth
       - ./data/whatsapp-db:/app/db
     environment:
-      - PORT=3001
+      - PORT=3002
       - AUTH_DIR=/app/auth
       - DB_PATH=/app/db/messages.db
     restart: unless-stopped
