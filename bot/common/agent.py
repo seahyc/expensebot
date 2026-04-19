@@ -184,7 +184,7 @@ def build_context_text(
         else ""
     )
     policy_block = (
-        f"## Expense policy\n{_POLICY_MD[:2000]}\n\n"
+        f"## Expense policy\n{_POLICY_MD[:3500]}\n\n"
         if _POLICY_MD
         else ""
     )
