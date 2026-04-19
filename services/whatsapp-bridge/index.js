@@ -99,6 +99,48 @@ function clearAuthState(sessionId) {
 // Baileys session management
 // ---------------------------------------------------------------------------
 
+async function syncRecentHistory(sessionId) {
+  const state = sessions.get(sessionId);
+  if (!state?.socket || !state.connected) return;
+
+  const sock = state.socket;
+  const cutoffTs = Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60; // 30 days
+
+  try {
+    const chats = await sock.groupFetchAllParticipating().catch(() => ({}));
+    // Get all chats (DMs + groups) from the socket store
+    const allChats = Object.values(sock.store?.chats?.all?.() || {});
+    if (!allChats.length) {
+      log.info({ sessionId }, "syncRecentHistory: no chats in store yet, skipping");
+      return;
+    }
+
+    let total = 0;
+    for (const chat of allChats.slice(0, 30)) {
+      const jid = chat.id;
+      if (!jid || jid === "status@broadcast") continue;
+      if (isJidBroadcast(jid)) continue;
+      try {
+        const msgs = await sock.loadMessages(jid, 50);
+        for (const msg of msgs?.messages || []) {
+          if (!msg.message) continue;
+          const ts = Number(msg.messageTimestamp || 0);
+          if (ts < cutoffTs) continue;
+          const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || null;
+          if (!text) continue;
+          try {
+            insertMsg.run(sessionId, jid, msg.key.participant || msg.key.remoteJid || jid, ts, text);
+            total++;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    log.info({ sessionId, total }, "syncRecentHistory: done");
+  } catch (e) {
+    log.warn({ sessionId, err: e.message }, "syncRecentHistory failed");
+  }
+}
+
 async function startSession(sessionId) {
   const state = getOrCreateSessionState(sessionId);
 
@@ -160,6 +202,8 @@ async function startSession(sessionId) {
         state.phone = null;
       }
       log.info({ sessionId, phone: state.phone }, "WA session connected");
+      // Pull recent message history from the last 30 days after connecting
+      setTimeout(() => syncRecentHistory(sessionId), 5000);
     }
 
     if (connection === "close") {
