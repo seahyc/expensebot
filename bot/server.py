@@ -1840,16 +1840,19 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         agent_raw = None
         active_trip = f"User hint: {user_note}" if user_note else None
         try:
-            agent_raw = await parse_receipt_via_agent(
-                file_bytes=file_bytes,
-                media_type=media_type,
-                filename=filename,
-                tenant_md=tenant_md,
-                user_md=user_md,
-                recent_claims_summary=recent_summary,
-                active_trip=active_trip,
+            agent_raw = await asyncio.wait_for(
+                parse_receipt_via_agent(
+                    file_bytes=file_bytes,
+                    media_type=media_type,
+                    filename=filename,
+                    tenant_md=tenant_md,
+                    user_md=user_md,
+                    recent_claims_summary=recent_summary,
+                    active_trip=active_trip,
+                ),
+                timeout=30.0,
             )
-        except Exception as e:
+        except (Exception, asyncio.TimeoutError) as e:
             log.info("Agent SDK parse skipped: %s", e)
 
         if agent_raw and agent_raw.get("is_receipt"):
