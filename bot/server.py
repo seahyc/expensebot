@@ -422,22 +422,23 @@ def _setup_status_text(u: dict) -> str:
     google_ok = bool(storage.get_google_tokens(uid)[0])
     tg_ok = bool(storage.get_telegram_session(uid))
     wa_ok = storage.get_whatsapp_connected(uid)
+    ext_url = f"{PUBLIC_BASE_URL}/extension"
 
     lines = ["*Janai — connection status*\n"]
-    lines.append(f"✅ *OmniHR* — expense filing")
+    lines.append("✅ *OmniHR* — expense filing")
     lines.append(f"{'✅' if google_ok else '⬜'} *Gmail & Calendar* — receipts in email, spending profile")
     if not google_ok:
-        lines.append("  → /connect\\_google then use the extension")
+        lines.append(f"  → /connect\\_google, then open the [Janai extension]({ext_url})")
     lines.append(f"{'✅' if tg_ok else '⬜'} *Telegram messages* — read your chats for context")
     if not tg_ok:
-        lines.append("  → /connect\\_telegram then use the extension")
+        lines.append(f"  → /connect\\_telegram, then open the [Janai extension]({ext_url})")
     lines.append(f"{'✅' if wa_ok else '⬜'} *WhatsApp messages* — read your chats for context")
     if not wa_ok:
-        lines.append("  → /connect\\_whatsapp then scan QR in the extension")
+        lines.append(f"  → /connect\\_whatsapp, then scan QR in the [Janai extension]({ext_url})")
     if google_ok and tg_ok and wa_ok:
         lines.append("\n_All connected. I'll keep your profile updated automatically._")
     else:
-        lines.append("\n_Each integration helps me know you better — fewer questions, faster filing._")
+        lines.append(f"\n_Need the extension? [Install it here]({ext_url}) — takes 30 seconds._")
     return "\n".join(lines)
 
 
@@ -570,11 +571,13 @@ async def cmd_connect_telegram(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     code = f"{secrets.randbelow(1_000_000):06d}"
     storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
     await update.message.reply_text(
-        f"Open the Janai extension, go to the Connections tab, and enter this code:\n\n"
-        f"`{code}`\n\n"
-        f"Then enter your phone number to connect Telegram.\n\n"
+        f"```\n{code}\n```\n"
+        f"👆 Tap to copy.\n\n"
+        f"Open the [Janai extension]({PUBLIC_BASE_URL}/extension) → Connections tab → paste this code → enter your phone number.\n\n"
+        f"_Don't have it? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds._\n\n"
         f"_(Code valid for 5 minutes.)_",
         parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
 
@@ -588,11 +591,13 @@ async def cmd_connect_whatsapp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     code = f"{secrets.randbelow(1_000_000):06d}"
     storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
     await update.message.reply_text(
-        f"Open the Janai extension, go to the Connections tab, and enter this code:\n\n"
-        f"`{code}`\n\n"
-        f"Then scan the QR code with WhatsApp → Linked Devices → Link a Device.\n\n"
+        f"```\n{code}\n```\n"
+        f"👆 Tap to copy.\n\n"
+        f"Open the [Janai extension]({PUBLIC_BASE_URL}/extension) → Connections tab → paste this code → scan the QR with WhatsApp (Linked Devices → Link a Device).\n\n"
+        f"_Don't have it? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds._\n\n"
         f"_(Code valid for 5 minutes.)_",
         parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
 
