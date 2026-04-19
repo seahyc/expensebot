@@ -60,7 +60,7 @@ from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationErro
 from omnihr_client.policies import PolicyEntry, get_policies
 from omnihr_client.schema import invalidate_schema
 
-from . import access, claude_oauth, logging_setup, pages, rate_limit, storage
+from . import access, claude_oauth, learning, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
 from .common import context_lookup
@@ -1264,6 +1264,11 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             async with client_for(u) as client:
                 await client.submit_draft(cid)
                 await _record_merchant_after_submit(client, u, cid)
+            storage.increment_submit_count(u["id"])
+            asyncio.create_task(learning.maybe_trigger_review(
+                user_id=u["id"], db=storage, anthropic_client=await anthropic_for(u),
+                recent_messages=[], trigger="submit",
+            ))
             return f"Submitted #{cid} for approval."
 
         elif tool_name == "delete_claim":
@@ -1446,6 +1451,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         reply = f"Something went wrong: {e}"
 
     storage.log_message(u["id"], "out", reply)
+    asyncio.create_task(learning.maybe_trigger_review(
+        user_id=u["id"], db=storage, anthropic_client=anth,
+        recent_messages=history, trigger="turn",
+    ))
     try:
         await progress.edit_text(reply, parse_mode="Markdown")
     except Exception:

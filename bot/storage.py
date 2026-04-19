@@ -126,6 +126,7 @@ _ADD_COLS = [
     ("users", "anth_expires_at", "TEXT"),      # ISO UTC; for Claude OAuth
     ("users", "last_inbound_at", "TEXT"),      # ISO UTC; bumped on any inbound msg
     ("users", "profile_md", "TEXT"),
+    ("users", "submit_count", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -299,6 +300,26 @@ def set_profile_md(user_id: int, markdown: str) -> None:
     """Persist the core-memory profile block — called from update_profile tool."""
     with db() as conn:
         conn.execute("UPDATE users SET profile_md=? WHERE id=?", (markdown, user_id))
+
+
+# --- Submit count (for self-learning harness) ---
+
+def increment_submit_count(user_id: int) -> None:
+    """Increment submit_count for this user."""
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET submit_count = submit_count + 1 WHERE id = ?",
+            (user_id,),
+        )
+
+
+def get_submit_count(user_id: int) -> int:
+    """Return current submit_count for this user (0 if not found)."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT submit_count FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return row["submit_count"] if row else 0
 
 
 def get_anth_key(user_id: int) -> str | None:
