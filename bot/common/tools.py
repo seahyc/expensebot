@@ -224,8 +224,9 @@ TOOLS = [
     {
         "name": "get_telegram_messages",
         "description": (
-            "Read the user's recent Telegram messages. Call whenever the user asks about "
-            "their Telegram chats, messages, or asks you to summarise Telegram activity."
+            "Bulk-fetch recent Telegram messages across all chats (no filter). "
+            "Use for summaries or when you don't know which chat to look in. "
+            "For messages from a specific person, use get_telegram_chat instead."
         ),
         "input_schema": {
             "type": "object",
@@ -236,6 +237,86 @@ TOOLS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "list_telegram_chats",
+        "description": (
+            "List the user's Telegram chats that had activity recently. "
+            "Returns chat names, types, and message counts. "
+            "Call this first when the user asks about a specific person — "
+            "it tells you which chat name to use with get_telegram_chat."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to look for activity. Default: 30.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_telegram_chat",
+        "description": (
+            "Fetch messages from a specific Telegram chat or contact by name. "
+            "Use when the user asks about messages from a specific person or group. "
+            "Use list_telegram_chats first if you're unsure of the exact chat name."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contact": {
+                    "type": "string",
+                    "description": "Name of the contact or group chat to fetch messages from.",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to fetch. Default: 7.",
+                },
+            },
+            "required": ["contact"],
+        },
+    },
+    {
+        "name": "list_whatsapp_chats",
+        "description": (
+            "List WhatsApp chats that have stored messages. "
+            "Returns contact names/numbers and message counts. "
+            "Call this first when the user asks about a specific WA contact."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to look. Default: 30.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_whatsapp_chat",
+        "description": (
+            "Fetch messages from a specific WhatsApp chat by contact name or phone number. "
+            "Use list_whatsapp_chats first to find the right contact identifier."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contact": {
+                    "type": "string",
+                    "description": "Contact name or phone number (partial match works).",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "How many days back to fetch. Default: 7.",
+                },
+            },
+            "required": ["contact"],
         },
     },
     {

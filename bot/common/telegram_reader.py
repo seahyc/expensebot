@@ -187,3 +187,120 @@ async def fetch_recent_messages(
 
     log.info("telegram_reader: fetched %d snippets for since=%s", len(results), since.date())
     return results
+
+
+async def list_chats(
+    session_str: str,
+    since: datetime,
+    max_dialogs: int = 50,
+    skip_bots: bool = True,
+) -> list[dict]:
+    """Return a list of chats that had activity since `since`.
+
+    Each entry: {name, type, count, last_message}
+    """
+    client = _make_client(session_str)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+
+    results: list[dict] = []
+    try:
+        await client.connect()
+        dialogs = await client.get_dialogs(limit=max_dialogs)
+        for dialog in dialogs:
+            try:
+                entity = dialog.entity
+                # Skip bots if requested
+                if skip_bots and getattr(entity, "bot", False):
+                    continue
+                count = 0
+                last_text = ""
+                async for msg in client.iter_messages(dialog.entity, limit=50):
+                    if msg.date and msg.date.replace(tzinfo=timezone.utc) < since:
+                        break
+                    if msg.text:
+                        count += 1
+                        if not last_text:
+                            last_text = msg.text[:80]
+                if count > 0:
+                    chat_type = "group" if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False) else (
+                        "channel" if getattr(entity, "broadcast", False) else "dm"
+                    )
+                    results.append({
+                        "name": dialog.name or "unknown",
+                        "type": chat_type,
+                        "count": count,
+                        "last_message": last_text,
+                    })
+            except Exception:
+                continue
+    except Exception as e:
+        log.warning("telegram_reader list_chats error: %s", e)
+        raise
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    results.sort(key=lambda x: x["count"], reverse=True)
+    return results
+
+
+async def fetch_chat_messages(
+    session_str: str,
+    contact: str,
+    since: datetime,
+    max_messages: int = 50,
+) -> list[str]:
+    """Fetch messages from a specific chat matching `contact` (case-insensitive partial match).
+
+    Returns list of "from {sender}: {text}" strings, or raises if not found.
+    """
+    client = _make_client(session_str)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+
+    contact_lower = contact.lower()
+    results: list[str] = []
+
+    try:
+        await client.connect()
+        dialogs = await client.get_dialogs(limit=100)
+
+        # Find best matching dialog
+        matched = None
+        for dialog in dialogs:
+            name = (dialog.name or "").lower()
+            if contact_lower in name:
+                matched = dialog
+                break
+
+        if not matched:
+            return [f"No chat found matching '{contact}'. Use list_telegram_chats to see available chats."]
+
+        async for msg in client.iter_messages(matched.entity, limit=max_messages):
+            if msg.date and msg.date.replace(tzinfo=timezone.utc) < since:
+                break
+            if not msg.text:
+                continue
+            # Resolve sender name
+            try:
+                sender = await msg.get_sender()
+                sender_name = getattr(sender, "first_name", None) or getattr(sender, "title", None) or "unknown"
+            except Exception:
+                sender_name = matched.name or "unknown"
+            results.append(f"[{msg.date.strftime('%Y-%m-%d %H:%M')}] {sender_name}: {msg.text[:200]}")
+
+    except Exception as e:
+        log.warning("telegram_reader fetch_chat_messages error: %s", e)
+        raise
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    results.reverse()  # oldest first
+    log.info("telegram_reader: fetched %d msgs from chat '%s'", len(results), contact)
+    return results

@@ -1515,6 +1515,113 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     all_msgs.append(f"(Telegram error: {e})")
             return "\n".join(all_msgs) if all_msgs else f"No Telegram messages found in the last {days} days."
 
+        elif tool_name == "list_telegram_chats":
+            days = int(tool_input.get("days", 30))
+            tg_accounts = storage.get_telegram_accounts(u["id"])
+            if not tg_accounts:
+                return "Telegram is not connected."
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            from .common.telegram_reader import list_chats as _tg_list_chats
+            all_chats: list[dict] = []
+            for _acct in tg_accounts:
+                sess = _acct.get("session_str")
+                if not sess:
+                    continue
+                try:
+                    chats = await asyncio.wait_for(_tg_list_chats(sess, since), timeout=25.0)
+                    all_chats.extend(chats)
+                except (asyncio.TimeoutError, Exception) as e:
+                    return f"(Telegram list_chats error: {e})"
+            if not all_chats:
+                return f"No Telegram chats with activity in the last {days} days."
+            lines = [f"Telegram chats (last {days} days):"]
+            for c in all_chats[:30]:
+                lines.append(f"- **{c['name']}** ({c['type']}) — {c['count']} messages | last: {c['last_message'][:60]}")
+            return "\n".join(lines)
+
+        elif tool_name == "get_telegram_chat":
+            contact = tool_input.get("contact", "")
+            days = int(tool_input.get("days", 7))
+            if not contact:
+                return "contact is required."
+            tg_accounts = storage.get_telegram_accounts(u["id"])
+            if not tg_accounts:
+                return "Telegram is not connected."
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            from .common.telegram_reader import fetch_chat_messages as _tg_chat
+            for _acct in tg_accounts:
+                sess = _acct.get("session_str")
+                if not sess:
+                    continue
+                try:
+                    msgs = await asyncio.wait_for(_tg_chat(sess, contact, since), timeout=25.0)
+                    return "\n".join(msgs) if msgs else f"No messages from '{contact}' in the last {days} days."
+                except asyncio.TimeoutError:
+                    return "(Telegram fetch timed out)"
+                except Exception as e:
+                    return f"(Telegram error: {e})"
+            return "No Telegram accounts available."
+
+        elif tool_name == "list_whatsapp_chats":
+            days = int(tool_input.get("days", 30))
+            wa_accounts = storage.get_whatsapp_accounts(u["id"])
+            if not wa_accounts:
+                return "WhatsApp is not connected."
+            since_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+            results = []
+            async with httpx.AsyncClient() as _hc:
+                for _acct in wa_accounts:
+                    sid = _acct["session_id"]
+                    try:
+                        r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/messages/{sid}", params={"since": since_ts}, timeout=5.0)
+                        if r.status_code != 200:
+                            continue
+                        msgs = r.json().get("messages", [])
+                        # Group by chat_jid
+                        chat_counts: dict[str, dict] = {}
+                        for m in msgs:
+                            jid = m.get("chat_jid", "unknown")
+                            if jid not in chat_counts:
+                                chat_counts[jid] = {"count": 0, "last": ""}
+                            chat_counts[jid]["count"] += 1
+                            if not chat_counts[jid]["last"] and m.get("text"):
+                                chat_counts[jid]["last"] = m["text"][:60]
+                        for jid, info in sorted(chat_counts.items(), key=lambda x: -x[1]["count"]):
+                            results.append(f"- {jid} — {info['count']} messages | last: {info['last']}")
+                    except Exception:
+                        continue
+            return ("WhatsApp chats:\n" + "\n".join(results)) if results else f"No WhatsApp messages in the last {days} days (bridge may need reconnection)."
+
+        elif tool_name == "get_whatsapp_chat":
+            contact = tool_input.get("contact", "")
+            days = int(tool_input.get("days", 7))
+            if not contact:
+                return "contact is required."
+            wa_accounts = storage.get_whatsapp_accounts(u["id"])
+            if not wa_accounts:
+                return "WhatsApp is not connected."
+            since_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+            contact_lower = contact.lower().replace("+", "").replace(" ", "")
+            all_msgs: list[str] = []
+            async with httpx.AsyncClient() as _hc:
+                for _acct in wa_accounts:
+                    sid = _acct["session_id"]
+                    try:
+                        r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/messages/{sid}", params={"since": since_ts}, timeout=5.0)
+                        if r.status_code != 200:
+                            continue
+                        for m in r.json().get("messages", []):
+                            jid = (m.get("chat_jid") or "").lower().replace("+", "").replace(" ", "")
+                            sender = (m.get("sender_jid") or "").lower().replace("+", "").replace(" ", "")
+                            if contact_lower in jid or contact_lower in sender:
+                                ts = datetime.fromtimestamp(m["timestamp"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                                all_msgs.append(f"[{ts}] {m.get('sender_jid','?')}: {m.get('text','')[:200]}")
+                    except Exception:
+                        continue
+            if not all_msgs:
+                return f"No WhatsApp messages from '{contact}' in the last {days} days. Use list_whatsapp_chats to see available contacts."
+            return "\n".join(sorted(all_msgs))
+
         elif tool_name == "get_omnihr_context":
             tenant_md = load_tenant_md(u.get("tenant_id"))
             policy_path = REPO_ROOT / "bot" / "skills" / "omnihr" / "policy.md"
