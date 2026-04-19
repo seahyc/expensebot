@@ -79,3 +79,10 @@ Note: field_ids above are Glints-specific examples. Always resolve from schema.
 - For flights → Travel-International / Flight Ticket
 - For subscriptions → Subscriptions - General or Development Tools
 - When unsure, ask the user rather than guessing wrong
+
+## CLI Commands (local testing)
+
+python -m bot.skills.omnihr.cli list --status draft
+python -m bot.skills.omnihr.cli list --status pending
+python -m bot.skills.omnihr.cli submit --id <claim_id>
+python -m bot.skills.omnihr.cli delete --id <claim_id>

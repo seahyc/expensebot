@@ -12,11 +12,20 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from anthropic import AsyncAnthropic
 
 from .tools import TOOLS
+
+# Load expense policy once at module level — missing file is non-fatal.
+try:
+    _POLICY_MD = (
+        Path(__file__).parent.parent / "skills" / "omnihr" / "policy.md"
+    ).read_text()
+except Exception:
+    _POLICY_MD = ""
 
 log = logging.getLogger(__name__)
 
@@ -174,12 +183,18 @@ def build_context_text(
         if triangulation_md
         else ""
     )
+    policy_block = (
+        f"## Expense policy\n{_POLICY_MD[:2000]}\n\n"
+        if _POLICY_MD
+        else ""
+    )
     return (
         f"## Org config\n{tenant_md[:2000]}\n\n"
         f"{about_block}"
         f"## Your rules (learned from past corrections)\n"
         f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
         f"{merchants_block}"
+        f"{policy_block}"
         f"## Recent claims\n{recent_claims[:1500]}\n\n"
         f"{triangulation_block}"
         f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
