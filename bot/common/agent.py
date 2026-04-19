@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,13 @@ log = logging.getLogger(__name__)
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 CONFIDENT_THRESHOLD = 3
+
+_SGT = timezone(timedelta(hours=8))  # Singapore Time — default for all users
+
+
+def _now_sgt() -> str:
+    now = datetime.now(_SGT)
+    return now.strftime("%A, %d %B %Y, %I:%M %p SGT")
 
 
 def render_merchants_block(rows: list[dict]) -> str:
@@ -105,6 +112,7 @@ def build_context_text(
         else ""
     )
     return (
+        f"## Now\n{_now_sgt()}\n\n"
         f"## Org config\n{tenant_md[:2000]}\n\n"
         f"{boss_block}"
         f"{about_block}"

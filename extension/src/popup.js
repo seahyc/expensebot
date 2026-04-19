@@ -1,10 +1,9 @@
 // Popup logic: detect logged-in omnihr.co session, accept pairing code, push to backend.
 
-// For local dev, override via:
-//   chrome.storage.local.set({backend: "http://localhost:8000"})
 const DEFAULT_BACKEND = "https://expensebot.seahyingcong.com";
 const BACKEND = await chrome.storage.local.get("backend").then(r => r.backend || DEFAULT_BACKEND);
 
+// --- Element refs ---
 const statusEl = document.getElementById("status");
 const codeEl = document.getElementById("code");
 const pairBtn = document.getElementById("pair");
@@ -13,7 +12,6 @@ const googleStatusEl = document.getElementById("google-status");
 const googleCodeEl = document.getElementById("google-code");
 const googleConnectBtn = document.getElementById("google-connect");
 
-// Telegram elements
 const tgStatusEl = document.getElementById("tg-status");
 const tgStep1El = document.getElementById("tg-step1");
 const tgStep2El = document.getElementById("tg-step2");
@@ -23,121 +21,142 @@ const tgInitBtn = document.getElementById("tg-init");
 const tgOtpEl = document.getElementById("tg-otp");
 const tgVerifyBtn = document.getElementById("tg-verify");
 
-// WhatsApp elements
 const waStatusEl = document.getElementById("wa-status");
 const waStep1El = document.getElementById("wa-step1");
+const waQrContainer = document.getElementById("wa-qr-container");
+const waQrImg = document.getElementById("wa-qr");
 const waCodeEl = document.getElementById("wa-code");
 const waInitBtn = document.getElementById("wa-init");
-const waQrContainerEl = document.getElementById("wa-qr-container");
-const waQrEl = document.getElementById("wa-qr");
 
-// Fetch Google client_id from backend so it doesn't need to be hardcoded here.
-let googleClientId = null;
-try {
-  const cfg = await fetch(`${BACKEND}/config/google`).then(r => r.json());
-  googleClientId = cfg.client_id || null;
-} catch (_) {}
-
-if (!googleClientId) {
-  googleStatusEl.className = "status warn";
-  googleStatusEl.textContent = "Google integration not configured.";
-  googleConnectBtn.disabled = true;
+// --- Status refresh from backend ---
+async function refreshStatus() {
+  const { ext_session } = await chrome.storage.local.get("ext_session");
+  if (!ext_session) return;
+  try {
+    const r = await fetch(`${BACKEND}/extension/status?token=${ext_session}`);
+    if (!r.ok) return;
+    applyStatus(await r.json());
+  } catch (_) {}
 }
 
+function applyStatus(s) {
+  if (s.paired) {
+    statusEl.className = "status ok";
+    statusEl.textContent = `✅ Paired as ${s.name || "?"}`;
+    codeEl.style.display = "none";
+    pairBtn.style.display = "none";
+  }
+
+  if (s.google) {
+    googleStatusEl.className = "status ok";
+    googleStatusEl.textContent = `✅ Connected${s.google_email ? " as " + s.google_email : ""}`;
+    googleCodeEl.style.display = "none";
+    googleConnectBtn.style.display = "none";
+  }
+
+  if (s.telegram) {
+    tgStatusEl.className = "status ok";
+    tgStatusEl.textContent = `✅ Connected${s.telegram_phone ? " (" + s.telegram_phone + ")" : ""}`;
+    tgStep1El.style.display = "none";
+    tgStep2El.style.display = "none";
+  }
+
+  if (s.whatsapp) {
+    waStatusEl.className = "status ok";
+    waStatusEl.textContent = `✅ Connected${s.whatsapp_phone ? " (" + s.whatsapp_phone + ")" : ""}`;
+    waStep1El.style.display = "none";
+    waQrContainer.style.display = "none";
+  }
+}
+
+// --- OmniHR init ---
 async function getOmniHRCookies() {
   const access = await chrome.cookies.get({ url: "https://api.omnihr.co/", name: "access_token" });
   const refresh = await chrome.cookies.get({ url: "https://api.omnihr.co/", name: "refresh_token" });
   return { access: access?.value, refresh: refresh?.value };
 }
 
-async function fetchAuthDetails(accessToken) {
-  // Cookie is HttpOnly so we can't set it from JS. But the cookies are auto-sent
-  // for *.omnihr.co requests. Use credentials:include.
-  const r = await fetch("https://api.omnihr.co/api/v1/auth/details/", {
-    credentials: "include",
-  });
-  if (!r.ok) return null;
-  return r.json();
-}
-
 async function init() {
+  await refreshStatus();  // show persisted status immediately
+
   const { access, refresh } = await getOmniHRCookies();
   if (!access || !refresh) {
-    statusEl.className = "status warn";
-    statusEl.textContent = "Open omnihr.co and sign in first.";
+    if (statusEl.className !== "status ok") {
+      statusEl.className = "status warn";
+      statusEl.textContent = "Open omnihr.co and sign in first.";
+    }
     return;
   }
-  const me = await fetchAuthDetails(access);
+  const r = await fetch("https://api.omnihr.co/api/v1/auth/details/", { credentials: "include" });
+  const me = r.ok ? await r.json() : null;
   if (!me) {
-    statusEl.className = "status warn";
-    statusEl.textContent = "Session not active — try signing in to omnihr.co again.";
+    if (statusEl.className !== "status ok") {
+      statusEl.className = "status warn";
+      statusEl.textContent = "Session not active — try signing in to omnihr.co again.";
+    }
     return;
   }
-  statusEl.className = "status ok";
-  statusEl.textContent = `Signed in as ${me.full_name} (${me.org?.name ?? "?"}).`;
+  if (statusEl.className !== "status ok") {
+    statusEl.className = "status ok";
+    statusEl.textContent = `Signed in as ${me.full_name} (${me.org?.name ?? "?"}).`;
+  }
   pairBtn.disabled = false;
   pairBtn.dataset.employeeId = me.id;
   pairBtn.dataset.org = JSON.stringify(me.org ?? {});
 }
 
+// Fetch Google client_id
+let googleClientId = null;
+try {
+  const cfg = await fetch(`${BACKEND}/config/google`).then(r => r.json());
+  googleClientId = cfg.client_id || null;
+} catch (_) {}
+if (!googleClientId) {
+  googleConnectBtn.disabled = true;
+}
+
+// --- Pair with OmniHR ---
 pairBtn.addEventListener("click", async () => {
   const code = codeEl.value.trim();
   if (!/^\d{6}$/.test(code)) {
-    statusEl.className = "status err";
-    statusEl.textContent = "Code must be 6 digits.";
-    return;
+    statusEl.className = "status err"; statusEl.textContent = "Code must be 6 digits."; return;
   }
   const { access, refresh } = await getOmniHRCookies();
   pairBtn.disabled = true;
-  statusEl.className = "status warn";
-  statusEl.textContent = "Pairing…";
+  statusEl.className = "status warn"; statusEl.textContent = "Pairing…";
   try {
     const r = await fetch(`${BACKEND}/extension/pair`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        pairing_code: code,
-        access_token: access,
-        refresh_token: refresh,
+        pairing_code: code, access_token: access, refresh_token: refresh,
         employee_id: Number(pairBtn.dataset.employeeId),
         org: JSON.parse(pairBtn.dataset.org || "{}"),
       }),
     });
     if (!r.ok) throw new Error(await r.text());
-    statusEl.className = "status ok";
-    statusEl.textContent = "✅ Paired. Check your bot.";
+    const data = await r.json();
+    if (data.ext_session) await chrome.storage.local.set({ ext_session: data.ext_session });
+    statusEl.className = "status ok"; statusEl.textContent = "✅ Paired. Check your bot.";
+    await refreshStatus();
   } catch (e) {
-    statusEl.className = "status err";
-    statusEl.textContent = `Pair failed: ${e.message}`;
+    statusEl.className = "status err"; statusEl.textContent = `Pair failed: ${e.message}`;
     pairBtn.disabled = false;
   }
 });
 
+// --- Google connect ---
 googleConnectBtn.addEventListener("click", async () => {
   const code = googleCodeEl.value.trim();
   if (!/^\d{6}$/.test(code)) {
-    googleStatusEl.className = "status err";
-    googleStatusEl.textContent = "Code must be 6 digits.";
-    return;
+    googleStatusEl.className = "status err"; googleStatusEl.textContent = "Code must be 6 digits."; return;
   }
-  if (!googleClientId) {
-    googleStatusEl.className = "status err";
-    googleStatusEl.textContent = "Google not configured — contact your admin.";
-    return;
-  }
-
   googleConnectBtn.disabled = true;
-  googleStatusEl.className = "status warn";
-  googleStatusEl.textContent = "Opening Google sign-in…";
+  googleStatusEl.className = "status warn"; googleStatusEl.textContent = "Opening Google sign-in…";
 
   const redirectUri = `https://${chrome.runtime.id}.chromiumapp.org/`;
-  const scopes = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/calendar.readonly",
-    "email",
-    "profile",
-  ].join(" ");
-
+  const scopes = ["https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar.readonly", "email", "profile"].join(" ");
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   authUrl.searchParams.set("client_id", googleClientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
@@ -147,211 +166,102 @@ googleConnectBtn.addEventListener("click", async () => {
   authUrl.searchParams.set("prompt", "consent");
 
   try {
-    const responseUrl = await chrome.identity.launchWebAuthFlow({
-      url: authUrl.toString(),
-      interactive: true,
-    });
-    const params = new URL(responseUrl).searchParams;
-    const authCode = params.get("code");
-    if (!authCode) throw new Error("No auth code in response");
-
+    const responseUrl = await chrome.identity.launchWebAuthFlow({ url: authUrl.toString(), interactive: true });
+    const authCode = new URL(responseUrl).searchParams.get("code");
+    if (!authCode) throw new Error("No auth code");
     googleStatusEl.textContent = "Connecting…";
     const r = await fetch(`${BACKEND}/extension/google-auth`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pairing_code: code,
-        auth_code: authCode,
-        redirect_uri: redirectUri,
-      }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairing_code: code, auth_code: authCode, redirect_uri: redirectUri }),
     });
     if (!r.ok) throw new Error(await r.text());
-    const data = await r.json();
-    googleStatusEl.className = "status ok";
-    googleStatusEl.textContent = `✅ Connected${data.email ? " as " + data.email : ""}.`;
     googleCodeEl.value = "";
+    await refreshStatus();
   } catch (e) {
-    googleStatusEl.className = "status err";
-    googleStatusEl.textContent = `Failed: ${e.message}`;
+    googleStatusEl.className = "status err"; googleStatusEl.textContent = `Failed: ${e.message}`;
     googleConnectBtn.disabled = false;
   }
 });
 
-// ---------------------------------------------------------------------------
-// Telegram connect flow
-// ---------------------------------------------------------------------------
-
-// Stores the pairing code during the two-step flow so verify can use it
-let tgPairingCode = null;
-
+// --- Telegram connect ---
 tgInitBtn.addEventListener("click", async () => {
   const code = tgCodeEl.value.trim();
   const phone = tgPhoneEl.value.trim();
-
-  if (!/^\d{6}$/.test(code)) {
-    tgStatusEl.className = "status err";
-    tgStatusEl.textContent = "Code must be 6 digits.";
-    return;
-  }
-  if (!phone || !/^\+\d{7,15}$/.test(phone)) {
-    tgStatusEl.className = "status err";
-    tgStatusEl.textContent = "Enter a valid phone number (e.g. +6591234567).";
-    return;
-  }
-
+  if (!/^\d{6}$/.test(code)) { tgStatusEl.className = "status err"; tgStatusEl.textContent = "Code must be 6 digits."; return; }
+  if (!phone) { tgStatusEl.className = "status err"; tgStatusEl.textContent = "Enter your phone number."; return; }
   tgInitBtn.disabled = true;
-  tgStatusEl.className = "status warn";
-  tgStatusEl.textContent = "Sending code to Telegram…";
-
+  tgStatusEl.className = "status warn"; tgStatusEl.textContent = "Sending code to Telegram…";
   try {
     const r = await fetch(`${BACKEND}/extension/telegram-init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pairing_code: code, phone }),
     });
     if (!r.ok) throw new Error(await r.text());
-
-    tgPairingCode = code;
-    tgStatusEl.className = "status warn";
-    tgStatusEl.textContent = "Code sent — check your Telegram app.";
+    tgStatusEl.textContent = "Code sent — check Telegram for the OTP.";
     tgStep1El.style.display = "none";
-    tgStep2El.style.display = "";
+    tgStep2El.style.display = "block";
   } catch (e) {
-    tgStatusEl.className = "status err";
-    tgStatusEl.textContent = `Failed: ${e.message}`;
+    tgStatusEl.className = "status err"; tgStatusEl.textContent = `Failed: ${e.message}`;
     tgInitBtn.disabled = false;
   }
 });
 
 tgVerifyBtn.addEventListener("click", async () => {
+  const code = tgCodeEl.value.trim();
   const otp = tgOtpEl.value.trim();
-  if (!/^\d{5,6}$/.test(otp)) {
-    tgStatusEl.className = "status err";
-    tgStatusEl.textContent = "Enter the code Telegram sent you.";
-    return;
-  }
-  if (!tgPairingCode) {
-    tgStatusEl.className = "status err";
-    tgStatusEl.textContent = "Session lost — start over.";
-    return;
-  }
-
   tgVerifyBtn.disabled = true;
-  tgStatusEl.className = "status warn";
-  tgStatusEl.textContent = "Verifying…";
-
+  tgStatusEl.className = "status warn"; tgStatusEl.textContent = "Verifying…";
   try {
     const r = await fetch(`${BACKEND}/extension/telegram-verify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairing_code: tgPairingCode, code: otp }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pairing_code: code, code: otp }),
     });
     if (!r.ok) throw new Error(await r.text());
-
-    tgStatusEl.className = "status ok";
-    tgStatusEl.textContent = "✅ Connected";
-    tgStep2El.style.display = "none";
-    tgPairingCode = null;
+    await refreshStatus();
   } catch (e) {
-    tgStatusEl.className = "status err";
-    tgStatusEl.textContent = `Verification failed: ${e.message}`;
+    tgStatusEl.className = "status err"; tgStatusEl.textContent = `Failed: ${e.message}`;
     tgVerifyBtn.disabled = false;
   }
 });
 
-// ---------------------------------------------------------------------------
-// WhatsApp connect flow
-// ---------------------------------------------------------------------------
-
-let waPairingCode = null;
-let waPollingTimer = null;
+// --- WhatsApp connect ---
+let waPolling = null;
 
 waInitBtn.addEventListener("click", async () => {
   const code = waCodeEl.value.trim();
-  if (!/^\d{6}$/.test(code)) {
-    waStatusEl.className = "status err";
-    waStatusEl.textContent = "Code must be 6 digits.";
-    return;
-  }
-
+  if (!/^\d{6}$/.test(code)) { waStatusEl.className = "status err"; waStatusEl.textContent = "Code must be 6 digits."; return; }
   waInitBtn.disabled = true;
-  waStatusEl.className = "status warn";
-  waStatusEl.textContent = "Starting WhatsApp session…";
-
+  waStatusEl.className = "status warn"; waStatusEl.textContent = "Connecting to WhatsApp…";
   try {
     const r = await fetch(`${BACKEND}/extension/whatsapp-init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pairing_code: code }),
     });
     if (!r.ok) throw new Error(await r.text());
-
-    waPairingCode = code;
-    waStatusEl.className = "status warn";
-    waStatusEl.textContent = "Loading QR code…";
     waStep1El.style.display = "none";
-    waQrContainerEl.style.display = "";
-
-    // Start polling for QR / connection
-    startWaPolling();
+    waQrContainer.style.display = "block";
+    waStatusEl.textContent = "Scan the QR code below with WhatsApp.";
+    startWaQrPoll(code);
   } catch (e) {
-    waStatusEl.className = "status err";
-    waStatusEl.textContent = `Failed: ${e.message}`;
+    waStatusEl.className = "status err"; waStatusEl.textContent = `Failed: ${e.message}`;
     waInitBtn.disabled = false;
   }
 });
 
-function startWaPolling() {
-  if (waPollingTimer) clearInterval(waPollingTimer);
-  waPollingTimer = setInterval(pollWaStatus, 3000);
-  // Poll immediately
-  pollWaStatus();
-}
-
-async function pollWaStatus() {
-  if (!waPairingCode) return;
-
-  try {
-    // First try to get the QR image
-    const qrResp = await fetch(
-      `${BACKEND}/extension/whatsapp-qr?pairing_code=${encodeURIComponent(waPairingCode)}`
-    );
-    if (qrResp.ok) {
-      const qrData = await qrResp.json();
-      if (qrData.connected) {
-        // Already connected according to QR endpoint
-        onWaConnected(null);
-        return;
+function startWaQrPoll(pairingCode) {
+  if (waPolling) clearInterval(waPolling);
+  waPolling = setInterval(async () => {
+    try {
+      const r = await fetch(`${BACKEND}/extension/whatsapp-qr?pairing_code=${pairingCode}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.connected) {
+        clearInterval(waPolling); waPolling = null;
+        await refreshStatus(); return;
       }
-      if (qrData.qr) {
-        waQrEl.src = qrData.qr;
-      }
-    }
-
-    // Also check status
-    const statusResp = await fetch(
-      `${BACKEND}/extension/whatsapp-status?pairing_code=${encodeURIComponent(waPairingCode)}`
-    );
-    if (statusResp.ok) {
-      const statusData = await statusResp.json();
-      if (statusData.connected) {
-        onWaConnected(statusData.phone);
-      }
-    }
-  } catch (_) {
-    // Bridge may not be running — ignore silently
-  }
-}
-
-function onWaConnected(phone) {
-  if (waPollingTimer) {
-    clearInterval(waPollingTimer);
-    waPollingTimer = null;
-  }
-  waPairingCode = null;
-  waQrContainerEl.style.display = "none";
-  waStatusEl.className = "status ok";
-  waStatusEl.textContent = phone ? `✅ Connected as ${phone}` : "✅ Connected";
+      if (data.qr) waQrImg.src = data.qr;
+    } catch (_) {}
+  }, 3000);
 }
 
 init();

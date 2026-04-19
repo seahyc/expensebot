@@ -2175,7 +2175,30 @@ async function submitKey(){{
             except Exception as e:
                 log.warning("Couldn't DM paired user: %s", e)
 
-        return {"ok": True, "user_id": user_db_id}
+        import uuid as _uuid
+        ext_token = str(_uuid.uuid4())
+        storage.set_ext_session(user_db_id, ext_token)
+        return {"ok": True, "user_id": user_db_id, "ext_session": ext_token}
+
+    @app.get("/extension/status")
+    async def extension_status(token: str = "") -> dict:
+        if not token:
+            raise HTTPException(status_code=400, detail="token required")
+        u = storage.get_user_by_ext_session(token)
+        if not u:
+            raise HTTPException(status_code=404, detail="session not found")
+        uid = u["id"]
+        google_ok = bool(storage.get_google_tokens(uid)[0])
+        return {
+            "paired": bool(u.get("access_jwt")),
+            "name": u.get("omnihr_full_name") or "",
+            "google": google_ok,
+            "google_email": u.get("google_email") or "",
+            "telegram": bool(storage.get_telegram_session(uid)),
+            "telegram_phone": u.get("telegram_phone") or "",
+            "whatsapp": storage.get_whatsapp_connected(uid),
+            "whatsapp_phone": u.get("whatsapp_phone") or "",
+        }
 
     @app.get("/config/google")
     async def config_google() -> dict:

@@ -138,6 +138,7 @@ _ADD_COLS = [
     ("users", "telegram_phone", "TEXT"),       # E.164 phone for display
     ("users", "whatsapp_phone", "TEXT"),       # E.164 for display
     ("users", "whatsapp_connected", "INTEGER DEFAULT 0"),
+    ("users", "ext_session", "TEXT"),          # UUID token for extension status API
 ]
 
 
@@ -927,3 +928,16 @@ def get_whatsapp_connected(user_id: int) -> bool:
             "SELECT whatsapp_connected FROM users WHERE id=?", (user_id,)
         ).fetchone()
         return bool(row and row["whatsapp_connected"])
+
+
+def set_ext_session(user_id: int, token: str) -> None:
+    with db() as conn:
+        conn.execute("UPDATE users SET ext_session=? WHERE id=?", (token, user_id))
+
+
+def get_user_by_ext_session(token: str) -> dict | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE ext_session=?", (token,)
+        ).fetchone()
+        return dict(row) if row else None
