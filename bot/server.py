@@ -1551,6 +1551,20 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
     return execute
 
 
+async def _keep_typing(bot, chat_id: int, stop_event: asyncio.Event) -> None:
+    """Send typing action every 4s until stop_event is set."""
+    from telegram import ChatAction
+    while not stop_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=4.0)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """All non-command text → agent with tools."""
     if not await _gate(update):
@@ -1625,10 +1639,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "parse"):
         return
 
-    progress = await msg.reply_text(voice_for_user(u).text("agent_progress"))
     user_md = load_user_md(u)
     executor = await _build_tool_executor(u)
     history = storage.get_recent_messages(u["id"], limit=12)
+
+    _stop_typing = asyncio.Event()
+    _typing_task = asyncio.create_task(_keep_typing(ctx.bot, msg.chat_id, _stop_typing))
 
     try:
         reply = await run_agent(
@@ -1645,6 +1661,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         log.warning("agent failed: %s", e)
         reply = f"Something went wrong: {e}"
+    finally:
+        _stop_typing.set()
+        _typing_task.cancel()
 
     storage.log_message(u["id"], "out", reply)
     asyncio.create_task(learning.maybe_trigger_review(
@@ -1652,9 +1671,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         recent_messages=history, trigger="turn",
     ))
     try:
-        await progress.edit_text(reply, parse_mode="Markdown")
+        await msg.reply_text(reply, parse_mode="Markdown")
     except Exception:
-        await progress.edit_text(reply)  # fallback without markdown
+        await msg.reply_text(reply)
 
 
 async def on_contact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2316,17 +2335,45 @@ async function submitKey(){{
         if not u:
             raise HTTPException(status_code=404, detail="session not found")
         uid = u["id"]
-        google_ok = bool(storage.get_google_tokens(uid)[0])
+        google_accounts = storage.get_google_accounts(uid)
+        tg_accounts = storage.get_telegram_accounts(uid)
+        wa_accounts = storage.get_whatsapp_accounts(uid)
         return {
             "paired": bool(u.get("access_jwt")),
             "name": u.get("omnihr_full_name") or "",
-            "google": google_ok,
-            "google_email": u.get("google_email") or "",
-            "telegram": bool(storage.get_telegram_session(uid)),
-            "telegram_phone": u.get("telegram_phone") or "",
-            "whatsapp": storage.get_whatsapp_connected(uid),
-            "whatsapp_phone": u.get("whatsapp_phone") or "",
+            # Legacy single-account fields (for backward compat)
+            "google": bool(google_accounts),
+            "google_email": google_accounts[0]["email"] if google_accounts else "",
+            "telegram": bool(tg_accounts),
+            "telegram_phone": tg_accounts[0]["phone"] if tg_accounts else "",
+            "whatsapp": bool(wa_accounts),
+            "whatsapp_phone": wa_accounts[0]["phone"] if wa_accounts else "",
+            # New multi-account arrays
+            "google_accounts": [{"email": a["email"]} for a in google_accounts],
+            "telegram_accounts": [{"phone": a["phone"]} for a in tg_accounts],
+            "whatsapp_accounts": [{"phone": a["phone"], "session_id": a["session_id"]} for a in wa_accounts],
         }
+
+    @app.delete("/extension/account")
+    async def extension_disconnect_account(
+        service: str, account_id: str, token: str = ""
+    ) -> dict:
+        """Disconnect a specific account. service = google|telegram|whatsapp, account_id = email|phone|session_id."""
+        if not token:
+            raise HTTPException(status_code=400, detail="token required")
+        u = storage.get_user_by_ext_session(token)
+        if not u:
+            raise HTTPException(status_code=404, detail="session not found")
+        uid = u["id"]
+        if service == "google":
+            storage.remove_google_account(uid, account_id)
+        elif service == "telegram":
+            storage.remove_telegram_account(uid, account_id)
+        elif service == "whatsapp":
+            storage.remove_whatsapp_account(uid, account_id)
+        else:
+            raise HTTPException(status_code=400, detail="unknown service")
+        return {"ok": True}
 
     @app.get("/config/google")
     async def config_google() -> dict:
@@ -2389,12 +2436,12 @@ async function submitKey(){{
         if info_r.status_code == 200:
             google_email = info_r.json().get("email")
 
-        storage.set_google_tokens(
+        storage.add_google_account(
             user_db_id,
+            email=google_email,
             access_token=access_token,
             refresh_token=refresh_token,
             expiry=expiry,
-            email=google_email,
         )
 
         user = storage.get_user(user_db_id)
@@ -2493,6 +2540,7 @@ async function submitKey(){{
 
         phone = _tg_phones.pop(user_db_id, "")
         storage.set_telegram_session(user_db_id, session_str, phone)
+        storage.add_telegram_account(user_db_id, phone, session_str)
 
         user = storage.get_user(user_db_id)
 
@@ -2582,6 +2630,7 @@ async function submitKey(){{
         if data.get("connected") and not storage.get_whatsapp_connected(user_db_id):
             phone = data.get("phone") or ""
             storage.set_whatsapp_connected(user_db_id, phone)
+            storage.add_whatsapp_account(user_db_id, phone, str(user_db_id))
             user = storage.get_user(user_db_id)
             if tg_app and user:
                 asyncio.create_task(_build_boss_profile_bg(user, tg_app))
@@ -2624,6 +2673,7 @@ async function submitKey(){{
         phone = data.get("phone") or ""
         if connected and not storage.get_whatsapp_connected(user_db_id):
             storage.set_whatsapp_connected(user_db_id, phone)
+            storage.add_whatsapp_account(user_db_id, phone, str(user_db_id))
             user = storage.get_user(user_db_id)
             if tg_app and user:
                 asyncio.create_task(_build_boss_profile_bg(user, tg_app))
