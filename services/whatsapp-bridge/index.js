@@ -203,14 +203,29 @@ async function startSession(sessionId) {
         state.phone = null;
       }
       log.info({ sessionId, phone: state.phone }, "WA session connected");
-      // Backfill from persisted JIDs (works on reconnect)
-      setTimeout(() => {
-        const jids = getKnownJids.all(sessionId).map((r) => r.jid);
-        if (jids.length > 0) {
-          log.info({ sessionId, count: jids.length }, "backfilling from persisted JIDs");
-          syncChatsHistory(sessionId, jids).catch((e) =>
+      // Backfill: first from persisted JIDs, then try fetching groups
+      setTimeout(async () => {
+        const persistedJids = getKnownJids.all(sessionId).map((r) => r.jid);
+        // Always try to get groups — this works on reconnect
+        let groupJids = [];
+        try {
+          const groups = await sock.groupFetchAllParticipating();
+          groupJids = Object.keys(groups || {});
+          for (const jid of groupJids) {
+            state.knownJids.add(jid);
+            try { upsertJid.run(sessionId, jid); } catch (_) {}
+          }
+        } catch (e) {
+          log.warn({ sessionId, err: e.message }, "groupFetchAllParticipating failed");
+        }
+        const allJids = [...new Set([...persistedJids, ...groupJids])];
+        if (allJids.length > 0) {
+          log.info({ sessionId, count: allJids.length }, "backfilling from known JIDs");
+          syncChatsHistory(sessionId, allJids).catch((e) =>
             log.warn({ sessionId, err: e.message }, "syncChatsHistory error")
           );
+        } else {
+          log.info({ sessionId }, "no known JIDs for backfill — waiting for contacts.upsert");
         }
       }, 5000);
     }
