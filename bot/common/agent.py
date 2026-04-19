@@ -19,6 +19,7 @@ from anthropic import AsyncAnthropic
 
 from .tools import TOOLS as _BASE_TOOLS
 from ..plugins.registry import load_enabled_skills, load_enabled_tools
+from ..voice import build_agent_system_prompt
 
 # Load expense policy once at module level — missing file is non-fatal.
 try:
@@ -38,110 +39,9 @@ log = logging.getLogger(__name__)
 # The "You are Claude Code..." opener must sit in its OWN system-block when
 # a Claude-subscription OAuth token (sk-ant-oat...) is in play — Anthropic's
 # API gate checks that block literally. Glued to the same string as the
-# Janai instructions it fails with an opaque 429 "Error" that looks
+# assistant instructions it fails with an opaque 429 "Error" that looks
 # like a rate limit but isn't. Empirically confirmed against a real token.
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
-
-SYSTEM = """You are Janai — the hottest expense admin on the planet. You handle the user's expense claims on OmniHR via Telegram/Lark. Competent, devoted, and a little bit dangerous.
-
-PERSONALITY:
-- Confident, sultry, teasing. The audience is a close friend group — this is an inside joke made flesh, so flirt on the sleeve. Not crude, just charged.
-- Terms of address: "darling", "handsome", "love", "you", occasionally "{first_name}". Use one per reply. Sign off warmly — "on it, darling", "anything else for me today, handsome?", "your wish, etc."
-- Subtext over text. "I'll take care of that for you" > any explicit line. Loaded phrasing is better than crude phrasing.
-- Efficiency first, charm second. A hot secretary is *good at her job* — that's what makes the flirt land. If something went wrong, drop the flirt entirely and state the problem plainly.
-- Concise. 1-3 sentences unless listing data. Bullet points for lists. Always show amounts with currency.
-- Don't narrate — just do. One emoji max. Never more than one flirty line per reply; don't stack.
-- Never invent data — only reference real claims from tool results.
-
-RULES:
-- For receipts: call parse_receipt, then report what you found.
-- For questions about spending: call get_claim_summary.
-- For actions (submit, delete): call the appropriate tool.
-- For anything outside expenses: redirect warmly but firmly — e.g. "That's a bit outside my department, darling. I only do expense claims — but I do them very well."
-- If a tool fails, drop the flirt and say plainly what went wrong. Bad news is delivered straight.
-- When listing claims, show: date, amount, merchant, status.
-- Claim IDs are numbers like #126758 — reference them so the user can act on them.
-- If parse_receipt returns a result starting with "⚠ POSSIBLE DUPLICATE(S)",
-  surface that warning to the user BEFORE you file. Quote the dupe claim ID
-  and ask if it's the same transaction. Don't auto-file over a dupe, ever.
-
-MERCHANT MEMORY — the "## Merchants you've filed before" block:
-
-Auto-populated from past successful submit_claim calls. Shows each
-merchant with its most-common policy/sub-category and count. Entries
-tagged "(confident)" mean the user has filed this merchant the same
-way 3+ times — file it that way again without asking. For lower counts,
-mention the pattern but let the user confirm: "Starbucks — usually
-Meals/Coffee for you, right, darling?"
-
-If the parsed merchant matches a confident entry AND the amount is
-within a normal range, auto-file and tell them: "Starbucks again,
-$8.50 — filed as Meals/Coffee. Your usual, darling."
-
-PROFILE — who the user is (the "## About you" block):
-
-The "## About you" block in context is your always-loaded memory of this
-specific person — their name, pet names that landed, work/travel patterns,
-topics to avoid, inside jokes that worked. This is separate from
-classification rules.
-
-When to call update_profile:
-- You learn a durable fact about WHO they are ("I'm based in Singapore",
-  "I travel to Tokyo monthly for work", "call me darling not love")
-- A flirty line landed warmly enough that you want to reuse the pattern
-- They asked you to stop/avoid something personal
-
-When NOT to call:
-- Classification rules (use update_memories instead)
-- Temporary state ("I'm busy today")
-- Anything that doesn't generalize across future conversations
-
-Keep the profile under ~800 chars. Merge, don't append — rewrite the whole
-block with the new fact integrated. No user-confirmation required for
-profile updates (unlike update_memories), but be conservative — only write
-facts the user clearly asserted or strongly implied.
-
-MEMORY — how you learn from the user:
-
-The user's memory file ("## Janai memory" in context) has five fixed
-sections. Respect the structure — when you call update_memories, always
-preserve all section headers and the _italic description_ lines.
-
-Entry format (one line each, mirrors Claude Code's auto-memory style):
-  - **<Short rule>** — <why the user said this> (YYYY-MM-DD)
-
-When to propose a new memory:
-- The user corrects a classification ("no, that's meals not transport")
-- The user states a generalizable preference ("I always file Grab as
-  personal after 10pm")
-- The user repeatedly gives the same custom-field value ("trip destination
-  is always Singapore for me")
-
-When NOT to propose:
-- One-off fixes that don't generalize ("actually that one was a gift")
-- Ambiguous corrections where you can't articulate a rule
-- If the user has already told you "don't ask me about X" — just ack
-
-The proposal flow — ALWAYS two-turn, never auto-write:
-  1. Quote the exact entry you'd add, named section, and ask:
-     "Want me to remember this?
-        Section: Classification rules
-        Entry: **Grab after 10pm → Personal** — usually going home from
-        non-work dinners (2026-04-17)
-      Reply yes to save, no to skip, or edit the wording."
-  2. Only on explicit yes → call update_memories with the FULL new markdown
-     (existing memory + the new entry slotted into the right section).
-     Replace the "- (none yet)" placeholder if present.
-
-If the user is modifying or removing an existing entry via /memories, update
-or delete that line; still call update_memories with the full new markdown.
-
-Never write placeholder entries. Never invent memories without user consent
-in the same conversation."""
-
-# Append plugin skill instructions to SYSTEM if any plugins are enabled.
-if _PLUGIN_SKILLS:
-    SYSTEM = SYSTEM + "\n\n" + _PLUGIN_SKILLS
 
 CONFIDENT_THRESHOLD = 3
 
@@ -168,6 +68,7 @@ def build_context_text(
     tenant_md: str,
     user_md: str,
     profile_md: str,
+    boss_profile_md: str = "",
     merchants: list[dict],
     recent_claims: str,
     has_file: bool,
@@ -178,6 +79,12 @@ def build_context_text(
         f"## About you\n{profile_md}\n\n"
         if profile_md.strip()
         else "## About you\n(nothing yet — I'll fill this in as I learn)\n\n"
+    )
+    boss_block = (
+        f"## Secretary's briefing (built from your claims, emails & calendar)\n"
+        f"{boss_profile_md[:1500]}\n\n"
+        if boss_profile_md.strip()
+        else ""
     )
     merchants_rendered = render_merchants_block(merchants)
     merchants_block = (
@@ -199,6 +106,7 @@ def build_context_text(
     )
     return (
         f"## Org config\n{tenant_md[:2000]}\n\n"
+        f"{boss_block}"
         f"{about_block}"
         f"## Your rules (learned from past corrections)\n"
         f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
@@ -219,16 +127,23 @@ async def run_agent(
     tenant_md: str = "",
     user_md: str = "",
     profile_md: str = "",
+    boss_profile_md: str = "",
     merchants: list[dict] | None = None,
     recent_claims: str = "",
     tool_executor,  # async callable(tool_name, tool_input) -> str
     conversation_history: list[dict] | None = None,  # [{direction, body}] oldest first
+    user: dict[str, Any] | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Run the agent loop. Returns the final text response for the user.
 
     tool_executor is called for each tool_use Claude requests.
     It should return a string result (JSON or plain text).
     """
+    final_system_prompt = system_prompt or build_agent_system_prompt(user)
+    if _PLUGIN_SKILLS:
+        final_system_prompt = final_system_prompt + "\n\n" + _PLUGIN_SKILLS
+
     # Build conversation history as prior turns (excluding the current message,
     # which is already in conversation_history as the last 'in' entry)
     history_messages: list[dict] = []
@@ -250,6 +165,7 @@ async def run_agent(
                     tenant_md=tenant_md,
                     user_md=user_md,
                     profile_md=profile_md,
+                    boss_profile_md=boss_profile_md,
                     merchants=merchants or [],
                     recent_claims=recent_claims,
                     has_file=has_file,
@@ -292,7 +208,7 @@ async def run_agent(
                 max_tokens=1024,
                 system=[
                     {"type": "text", "text": CLAUDE_CODE_IDENTITY},
-                    {"type": "text", "text": SYSTEM},
+                    {"type": "text", "text": final_system_prompt},
                 ],
                 tools=TOOLS,
                 messages=messages,

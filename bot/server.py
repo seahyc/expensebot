@@ -62,12 +62,14 @@ from omnihr_client.schema import invalidate_schema
 
 from . import access, claude_oauth, learning, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
+from .common.boss_profile import refresh_boss_profile
 from .plugins.registry import load_enabled_skills, load_enabled_tools
 from .common.agent_parser import parse_receipt_via_agent
 from .common import context_lookup
 from .common.context_lookup import triangulate
 from .common.parser import ParsedReceipt, parse_receipt
 from .common.pipeline import format_dupe_warning, match_dupes
+from .voice import default_voice, memory_template, voice_for_user
 
 logging_setup.setup()
 log = logging.getLogger("expensebot")
@@ -174,7 +176,7 @@ def load_user_md(_user: dict) -> str:
     """Return the user's memory — falls back to the scaffold template so the
     agent always sees the five section headers and can slot new entries in."""
     stored = (_user.get("user_md") or "").strip()
-    return stored if stored else storage.DEFAULT_MEMORY_TEMPLATE
+    return stored if stored else memory_template(_user)
 
 
 # ---------------------------------------------------------------------------
@@ -338,61 +340,36 @@ def load_skill(hrms: str = "omnihr") -> str:
     return path.read_text() if path.exists() else ""
 
 
-def _first_name(full_or_first: str | None) -> str:
-    """Pick a first-name to address the user with. Falls back to 'darling'
+def _first_name(full_or_first: str | None, user: dict | None = None) -> str:
+    """Pick a first-name to address the user with. Falls back to a neutral noun
     so copy always reads naturally even when we have no name."""
+    voice = voice_for_user(user)
     if not full_or_first:
-        return "darling"
-    return full_or_first.strip().split()[0] or "darling"
+        return voice.text("anonymous_name")
+    return full_or_first.strip().split()[0] or voice.text("anonymous_name")
 
 
-def step1_prompt(first_name: str | None = None) -> str:
-    name = _first_name(first_name)
-    return (
-        f"💰 *Well hello, {name}.*\n\n"
-        f"I'm Janai — your new expense admin. I'm very good at this. You hand me receipts, "
-        f"I handle everything else. Drafts, submissions, questions about what you spent — all mine.\n\n"
-        f"Setup's about 2 minutes. I'll walk you through it one step at a time, darling.\n\n"
-        f"*Step 1 of 3 — connect your AI*\n"
-        f"Send /login to hook up your Claude Pro/Max subscription (or paste an API key). "
-        f"That's what I use to read your receipts properly."
+def step1_prompt(first_name: str | None = None, user: dict | None = None) -> str:
+    voice = voice_for_user(user)
+    return voice.text(
+        "step1_prompt",
+        name=_first_name(first_name, user),
+        brand_name=voice.text("brand_name"),
     )
 
 
 # Kept for backward-compat with any other call site; prefer step1_prompt().
 STEP1_PROMPT = step1_prompt(None)
 
-STEP2_PROMPT = (
-    "*Step 2 of 3 — install the Chrome extension*\n"
-    "This is what hands your OmniHR login to the bot.\n\n"
-    "👉 [Install it here](https://expensebot.seahyingcong.com/extension) — the page walks you through it (takes ~30 seconds).\n\n"
-    "Once installed and pinned, come back for step 3."
-)
+def step2_prompt(user: dict | None = None) -> str:
+    return voice_for_user(user).text("step2_prompt")
 
-STEP3_PROMPT = (
-    "*Step 3 of 3 — pair your OmniHR account*\n"
-    "1. Sign in to your company's OmniHR in Chrome — it's at "
-    "`<your-company>.omnihr.co` (e.g. `glints.omnihr.co`). If your dashboard "
-    "loads without a login prompt, you're already signed in.\n"
-    "2. Send /pair here — I'll reply with a 6-digit code.\n"
-    "3. On that OmniHR tab, click the 💰 *Janai* icon in Chrome's toolbar "
-    "(or the puzzle-piece menu if unpinned) → paste the code → tap *Pair*.\n\n"
-    "That's it — I'll confirm once we're connected, love."
-)
+def step3_prompt(user: dict | None = None) -> str:
+    voice = voice_for_user(user)
+    return voice.text("step3_prompt", brand_name=voice.text("brand_name"))
 
-def ready_prompt(first_name: str | None = None) -> str:
-    name = _first_name(first_name)
-    return (
-        f"👋 *All set, {name}.*\n\n"
-        f"Send me a receipt — photo, PDF, whichever — and I'll file it for you, darling. "
-        f"Throw in a caption like _\"client lunch\"_ if you want me to get the context right.\n\n"
-        f"*Things you can ask me:*\n"
-        f"• /list — your recent claims\n"
-        f"• /list approved — filter by status\n"
-        f"• _\"how much did I spend in April?\"_\n"
-        f"• _\"submit claim 126758\"_ · _\"delete the grab one\"_\n\n"
-        f"Anything else you need, just say the word."
-    )
+def ready_prompt(first_name: str | None = None, user: dict | None = None) -> str:
+    return voice_for_user(user).text("ready_prompt", name=_first_name(first_name, user))
 
 
 READY_PROMPT = ready_prompt(None)
@@ -405,39 +382,22 @@ def _web_next_step_html(user_db_id: int, u: dict | None) -> dict:
     has_ai = bool(storage.get_anth_key(user_db_id))
     has_omnihr = bool(u and u.get("access_jwt"))
     tg_link = f"https://t.me/{pages.BOT_USERNAME}" if pages.BOT_USERNAME else "https://t.me/"
+    voice = voice_for_user(u)
 
     if has_ai and has_omnihr:
         return {
-            "title": "✅ All set!",
-            "body_html": (
-                f'<p>You\'re fully connected. '
-                f'<a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">'
-                f'Open Telegram →</a> and send a receipt photo or PDF to file your first claim.</p>'
-            ),
+            "title": voice.text("web_all_set_title"),
+            "body_html": voice.text("web_all_set_body", tg_link=tg_link),
         }
     if has_ai and not has_omnihr:
         return {
-            "title": "✅ Step 1 of 3 done — AI connected",
-            "body_html": (
-                '<p style="color:#ccc"><strong>Two more steps to go:</strong></p>'
-                '<p><strong>2.</strong> '
-                '<a href="/extension" style="color:#8b6cff;font-weight:600">Install the Chrome extension</a> '
-                '— the page walks you through it (~30 seconds).</p>'
-                '<p><strong>3.</strong> Sign in to your company\'s OmniHR '
-                '(<code>&lt;your-company&gt;.omnihr.co</code>, e.g. '
-                '<code>glints.omnihr.co</code>) in Chrome, then send '
-                f'<a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">'
-                f'<code>/pair</code> in Telegram</a>. '
-                'Paste the 6-digit code into the 💰 extension icon to finish.</p>'
-            ),
+            "title": voice.text("web_ai_connected_title"),
+            "body_html": voice.text("web_ai_connected_body", tg_link=tg_link),
         }
     # AI not yet connected — unusual on this page, but handle gracefully
     return {
-        "title": "Progress saved",
-        "body_html": (
-            f'<p><a href="{tg_link}" target="_blank" style="color:#8b6cff;font-weight:600">'
-            f'Go back to Telegram</a> and send /login to connect your AI.</p>'
-        ),
+        "title": voice.text("web_progress_saved_title"),
+        "body_html": voice.text("web_progress_saved_body", tg_link=tg_link),
     }
 
 
@@ -447,13 +407,13 @@ def _next_step_prompt(user_db_id: int, u: dict | None, first_name: str | None = 
     has_ai = bool(storage.get_anth_key(user_db_id))
     has_omnihr = bool(u and u.get("access_jwt"))
     if not has_ai:
-        return step1_prompt(first_name)
+        return step1_prompt(first_name, u)
     if not has_omnihr:
         # Step 2 (install extension) and step 3 (pair) are shown together here
         # because step 2 has no signal we can detect — the user just reads and
         # installs. After they install, they'll already see step 3 beneath it.
-        return STEP2_PROMPT + "\n\n" + STEP3_PROMPT
-    return ready_prompt(first_name)
+        return step2_prompt(u) + "\n\n" + step3_prompt(u)
+    return ready_prompt(first_name, u)
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -483,8 +443,7 @@ async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     bridge_url = f"{PUBLIC_BASE_URL}/auth/start?s={state}&oauth={quote(oauth_url, safe='')}"
 
     await update.message.reply_text(
-        f"[👆 Tap to sign in with Claude]({bridge_url})\n\n"
-        f"_(opens a page — authorize, copy the token, paste it back)_",
+        voice_for_user(storage.get_user(user_db_id)).text("login_link_prompt", bridge_url=bridge_url),
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -525,7 +484,7 @@ async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     storage.set_anth_key(user_db_id, key)
     u = storage.get_user(user_db_id)
     await update.message.reply_text(
-        "✅ *Step 1 of 3 done — AI connected.*\n\n" + _next_step_prompt(user_db_id, u),
+        voice_for_user(u).text("step1_done_ai_connected", next_steps=_next_step_prompt(user_db_id, u)),
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -539,21 +498,10 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     code = f"{secrets.randbelow(1_000_000):06d}"
     storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
+    voice = voice_for_user(storage.get_user(user_db_id))
     # Big tap-to-copy code block — Telegram copies on tap/hold of ``` blocks.
     await update.message.reply_text(
-        f"```\n{code}\n```\n"
-        f"👆 Tap the code to copy.\n\n"
-        f"*Don't have the extension yet?* "
-        f"[Install it here](https://expensebot.seahyingcong.com/extension) first (~30s).\n\n"
-        f"*Before you paste:* make sure you're signed in to your company's OmniHR "
-        f"in Chrome — it's at `<your-company>.omnihr.co` (e.g. `glints.omnihr.co`). "
-        f"If your dashboard loads without a login prompt, you're good.\n\n"
-        f"*Then:*\n"
-        f"1. On that OmniHR tab, click the 💰 Janai icon in Chrome's toolbar "
-        f"(or the puzzle-piece menu if it isn't pinned yet).\n"
-        f"2. Paste the 6-digit code.\n"
-        f"3. Tap *Pair*.\n\n"
-        f"_Code expires in 5 minutes._",
+        voice.text("pair_code_prompt", code=code, brand_name=voice.text("brand_name")),
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
@@ -567,17 +515,14 @@ async def cmd_connect_google(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         return
     if not GOOGLE_CLIENT_ID:
         await update.message.reply_text(
-            "⚠️ Google integration isn't configured yet — ask your admin to set GOOGLE_CLIENT_ID."
+            default_voice().text("google_not_configured")
         )
         return
     code = f"{secrets.randbelow(1_000_000):06d}"
     storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
+    voice = voice_for_user(storage.get_user(user_db_id))
     await update.message.reply_text(
-        f"```\n{code}\n```\n"
-        f"👆 Tap the code to copy.\n\n"
-        f"Then open the *Janai* extension on any tab and use the "
-        f"*Connect Gmail & Calendar* section — paste this code and click *Connect Google*.\n\n"
-        f"_Code expires in 5 minutes._",
+        voice.text("google_pair_prompt", code=code, brand_name=voice.text("brand_name")),
         parse_mode="Markdown",
     )
 
@@ -1040,10 +985,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await q._bot.send_message(
                 chat_id=chat_id,
-                text=(
-                    "Send me the corrected description as a reply, darling. "
-                    "I'll update it before filing. ✏️"
-                ),
+                text=voice_for_user(pending.u).text("description_edit_prompt"),
             )
         except Exception as e:
             log.warning("edit_desc send failed: %s", e)
@@ -1424,7 +1366,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         oauth_code, oauth_state = hash_match.group(1), hash_match.group(2)
 
     if oauth_code and oauth_state and oauth_state in claude_oauth._pending:
-        progress = await msg.reply_text("Just a moment, darling…")
+        progress = await msg.reply_text(voice_for_user(u).text("oauth_progress"))
         ok, err_msg, token_data = await claude_oauth.exchange_code(oauth_state, oauth_code)
         if ok and token_data:
             exp = None
@@ -1438,8 +1380,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             u = storage.get_user(token_data["user_db_id"])
             await progress.edit_text(
-                "✅ *Step 1 of 3 done — Claude subscription linked.*\n\n"
-                + _next_step_prompt(token_data["user_db_id"], u),
+                voice_for_user(u).text(
+                    "step1_done_claude_linked",
+                    next_steps=_next_step_prompt(token_data["user_db_id"], u),
+                ),
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
             )
@@ -1451,8 +1395,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         anth = await anthropic_for(u)
     except RuntimeError:
         await msg.reply_text(
-            "I'd love to help! First, connect your AI:\n\n"
-            "👉 /login — takes 30 seconds",
+            voice_for_user(u).text("connect_ai_first"),
             parse_mode="Markdown",
         )
         return
@@ -1460,7 +1403,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "parse"):
         return
 
-    progress = await msg.reply_text("Give me a second, handsome… 😏")
+    progress = await msg.reply_text(voice_for_user(u).text("agent_progress"))
     tenant_md = load_tenant_md(u.get("tenant_id"))
     user_md = load_user_md(u)
     executor = await _build_tool_executor(u)
@@ -1474,10 +1417,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             tenant_md=tenant_md,
             user_md=user_md,
             profile_md=storage.get_profile_md(u["id"]),
+            boss_profile_md=storage.get_boss_profile_md(u["id"]),
             merchants=storage.top_merchants(u["id"], limit=20),
             recent_claims="(agent will fetch via tools if needed)",
             tool_executor=executor,
             conversation_history=history,
+            user=u,
         )
     except Exception as e:
         log.warning("agent failed: %s", e)
@@ -1519,15 +1464,20 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         anth = await anthropic_for(u)
     except RuntimeError:
         await msg.reply_text(
-            "I can't read receipts until we connect an AI.\n\n" + _next_step_prompt(u["id"], u),
+            voice_for_user(u).text(
+                "connect_ai_before_receipts",
+                next_steps=_next_step_prompt(u["id"], u),
+            ),
             parse_mode="Markdown",
             disable_web_page_preview=True,
         )
         return
     if not u.get("access_jwt"):
         await msg.reply_text(
-            "AI is connected but I can't file claims until you link OmniHR.\n\n"
-            + _next_step_prompt(u["id"], u),
+            voice_for_user(u).text(
+                "connect_omnihr_before_receipts",
+                next_steps=_next_step_prompt(u["id"], u),
+            ),
             parse_mode="Markdown",
             disable_web_page_preview=True,
         )
@@ -1777,10 +1727,12 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
         """Bridge page: OAuth sign-in OR API key — both options on one page."""
         if not s or not oauth:
             return HTMLResponse("<h1>Invalid link</h1><p>Try /login again.</p>", status_code=400)
+        voice = default_voice()
+        brand_name = voice.text("brand_name")
         page = f"""<!doctype html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Janai — Sign in</title>
+<title>{brand_name} — {voice.text("auth_start_title")}</title>
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#eee;
@@ -1806,8 +1758,8 @@ def make_app(tg_app: Application | None = None) -> FastAPI:
   .small{{font-size:11px;color:#555;text-align:center;margin-top:4px}}
 </style></head><body>
 <div class="c">
-  <h1>💰 Janai</h1>
-  <div class="sub">Connect your AI to parse receipts</div>
+  <h1>💰 {brand_name}</h1>
+  <div class="sub">{voice.text("auth_start_subtitle")}</div>
 
   <!-- Single combined view: open Claude in new tab, come back, paste here -->
   <div id="s1">
@@ -1922,12 +1874,12 @@ async function submitKey(){{
         if tg_app:
             try:
                 u = storage.get_user(token_data["user_db_id"])
+                voice = voice_for_user(u)
                 await tg_app.bot.send_message(
                     chat_id=token_data["telegram_user_id"],
-                    text=(
-                        "✅ *Step 1 of 3 done — Claude subscription linked.*\n"
-                        "Receipts will be parsed using your Claude plan — no API key needed.\n\n"
-                        + _next_step_prompt(token_data["user_db_id"], u)
+                    text=voice.text(
+                        "step1_done_claude_linked",
+                        next_steps=_next_step_prompt(token_data["user_db_id"], u),
                     ),
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
@@ -1955,11 +1907,12 @@ async function submitKey(){{
         u = storage.get_user(pending.user_db_id)
         if tg_app:
             try:
+                voice = voice_for_user(u)
                 await tg_app.bot.send_message(
                     chat_id=pending.telegram_user_id,
-                    text=(
-                        "✅ *Step 1 of 3 done — API key saved.*\n\n"
-                        + _next_step_prompt(pending.user_db_id, u)
+                    text=voice.text(
+                        "step1_done_api_key_saved",
+                        next_steps=_next_step_prompt(pending.user_db_id, u),
                     ),
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
@@ -1969,22 +1922,31 @@ async function submitKey(){{
         return {"ok": True, "next": _web_next_step_html(pending.user_db_id, u)}
 
     @app.get("/favicon.ico")
-    @app.get("/favicon.svg")
     async def favicon() -> Response:
-        # Just the 💰 emoji. Modern browsers render emoji in SVG favicons
-        # using the OS's native color-emoji font (Apple on Mac/iOS, Segoe UI
-        # Emoji on Windows, Noto on Linux) — stays visually consistent with
-        # the 💰 used in page headers + bot messages.
+        icon_path = Path(__file__).parent.parent / "extension" / "favicon.ico"
+        if icon_path.exists():
+            return Response(
+                content=icon_path.read_bytes(),
+                media_type="image/x-icon",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
         svg = (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
             '<text y=".9em" font-size="90">\U0001F4B0</text>'
             "</svg>"
         )
-        return Response(
-            content=svg,
-            media_type="image/svg+xml",
-            headers={"Cache-Control": "public, max-age=86400"},
-        )
+        return Response(content=svg, media_type="image/svg+xml")
+
+    @app.get("/icon-128.png")
+    async def icon_png() -> Response:
+        icon_path = Path(__file__).parent.parent / "extension" / "icons" / "icon-128.png"
+        if icon_path.exists():
+            return Response(
+                content=icon_path.read_bytes(),
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+        raise HTTPException(status_code=404)
 
     @app.get("/extension")
     async def extension_page() -> HTMLResponse:
@@ -2174,24 +2136,70 @@ async function submitKey(){{
             email=google_email,
         )
 
+        user = storage.get_user(user_db_id)
+
         # DM confirmation
         if tg_app:
-            user = storage.get_user(user_db_id)
             try:
                 await tg_app.bot.send_message(
                     chat_id=int(user["channel_user_id"]),
                     text=(
                         f"✅ Gmail & Calendar connected"
                         + (f" ({google_email})" if google_email else "")
-                        + ".\n\nI'll now search your emails and calendar when you send receipts."
+                        + ".\n\nReading your history now so I know you better. Give me a moment, darling. 📚"
                     ),
                 )
             except Exception as e:
                 log.warning("Couldn't DM after google-auth: %s", e)
 
+        # Kick off background profile build
+        asyncio.create_task(_build_boss_profile_bg(user, tg_app))
+
         return {"ok": True, "email": google_email}
 
     return app
+
+
+# ---------------------------------------------------------------------------
+# Background: boss profile builder
+# ---------------------------------------------------------------------------
+
+async def _build_boss_profile_bg(user: dict, tg_app) -> None:
+    """Background task: fetch all claims + Gmail + Calendar, condense into boss profile."""
+    user_id = user["id"]
+    first_name = (user.get("full_name") or "").split()[0] if user.get("full_name") else ""
+    try:
+        anth = await anthropic_for(user)
+        tokens = storage.get_omnihr_tokens(user_id)
+        access_token = tokens[0] if tokens else None
+        if not access_token:
+            log.warning("boss_profile: no OmniHR token for user=%s", user_id)
+            return
+
+        tenant_id = user.get("tenant_id") or ""
+        async with httpx.AsyncClient(
+            base_url="https://api.omnihr.co/api/v1",
+            cookies={"access_token": access_token},
+            timeout=20.0,
+        ) as client:
+            profile = await refresh_boss_profile(
+                user_id=user_id,
+                omnihr_http_client=client,
+                tenant_id=tenant_id,
+                first_name=first_name,
+                anthropic_client=anth,
+            )
+
+        if profile and tg_app:
+            try:
+                await tg_app.bot.send_message(
+                    chat_id=int(user["channel_user_id"]),
+                    text="I've read through your history and I know you now. Ready when you are. 💼",
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("_build_boss_profile_bg failed for user=%s: %s", user_id, e)
 
 
 # ---------------------------------------------------------------------------

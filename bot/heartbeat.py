@@ -25,6 +25,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import json
 
 from . import storage
+from .voice import voice_for_user
 
 log = logging.getLogger(__name__)
 
@@ -34,16 +35,6 @@ HEARTBEAT_MD = Path(__file__).parent / "skills" / "HEARTBEAT.md"
 ACTIVE_HOURS_START = int(os.getenv("HEARTBEAT_ACTIVE_START", "8"))    # 8am SGT
 ACTIVE_HOURS_END   = int(os.getenv("HEARTBEAT_ACTIVE_END", "22"))     # 10pm SGT
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", "30"))
-
-_HEARTBEAT_SYSTEM = """\
-You are Janai, a sharp-witted, flirty AI expense assistant for a small circle of friends.
-You are running a background health check — not a conversation. Your job:
-- Call the appropriate tool(s) to check the requested condition.
-- If something needs the user's attention, reply with a concise, friendly (Janai-style) message.
-- If nothing needs attention, reply with exactly: HEARTBEAT_OK
-Do NOT add pleasantries or preamble. HEARTBEAT_OK means silence — the user will not see it.
-Reply HEARTBEAT_OK if nothing needs attention.
-"""
 
 # Tool subset available to heartbeat tasks
 _HEARTBEAT_TOOLS = [
@@ -199,7 +190,14 @@ class HeartbeatRunner:
         Returns Claude's text response, or None on error.
         """
         profile_md = storage.get_profile_md(user["id"])
-        system = _HEARTBEAT_SYSTEM
+        system = (
+            f"{voice_for_user(user).agent_system}\n\n"
+            "You are running a background health check — not a conversation.\n"
+            "- Call the appropriate tool(s) to check the requested condition.\n"
+            "- If something needs the user's attention, reply with a concise actionable message.\n"
+            "- If nothing needs attention, reply with exactly: HEARTBEAT_OK\n"
+            "Do NOT add preamble. HEARTBEAT_OK means silence — the user will not see it."
+        )
         if profile_md:
             system = f"{system}\n\n## User profile\n{profile_md}"
 

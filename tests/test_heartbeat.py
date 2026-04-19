@@ -331,7 +331,7 @@ async def test_actionable_response_sends_message(runner, mock_bot, mock_anth, tm
     user = storage.get_user(uid)
 
     mock_anth.messages.create.return_value = _make_text_response(
-        "Hey darling, you've got 2 drafts older than 3 days — don't forget to submit them!"
+        "You have 2 drafts older than 3 days. Review and submit them when ready."
     )
 
     await runner._tick_user({**user, "channel": "telegram", "channel_user_id": tg_chat_id}, runner._load_tasks())

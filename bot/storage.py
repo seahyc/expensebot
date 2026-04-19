@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import crypto
+from .voice import memory_template
 
 DB_PATH = Path(__file__).parent.parent / "expensebot.db"
 
@@ -131,6 +132,8 @@ _ADD_COLS = [
     ("users", "google_refresh_token", "TEXT"), # encrypted; Google OAuth
     ("users", "google_token_expiry", "TEXT"),  # ISO UTC
     ("users", "google_email", "TEXT"),         # connected Google account email
+    ("users", "boss_profile_md", "TEXT"),      # secretary's briefing — built from claims+gmail+gcal
+    ("users", "boss_profile_updated_at", "TEXT"),  # ISO UTC; last full rebuild
 ]
 
 
@@ -288,28 +291,7 @@ def get_google_tokens(user_id: int) -> tuple[str | None, str | None, datetime | 
 #   - "Don't ask" section is the escape hatch for one-offs
 # Why this shape (vs free-form markdown): predictable slots for the agent to
 # append to, and human-skimmable when the user hits /memories.
-DEFAULT_MEMORY_TEMPLATE = """# Janai memory
-
-## Classification rules
-_"When X, file as Y" patterns learned from your corrections._
-- (none yet)
-
-## Merchant shortcuts
-_Vendors you file consistently the same way._
-- (none yet)
-
-## Defaults
-_Values to fill when I'm missing one (trip destination, currency, etc.)._
-- (none yet)
-
-## Description style
-_How you like receipt descriptions phrased._
-- (none yet)
-
-## Don't ask me about
-_One-offs you've told me to handle case-by-case instead of memorizing._
-- (none yet)
-"""
+DEFAULT_MEMORY_TEMPLATE = memory_template()
 
 
 def set_user_md(user_id: int, markdown: str) -> None:
@@ -344,6 +326,32 @@ def set_profile_md(user_id: int, markdown: str) -> None:
     """Persist the core-memory profile block — called from update_profile tool."""
     with db() as conn:
         conn.execute("UPDATE users SET profile_md=? WHERE id=?", (markdown, user_id))
+
+
+def get_boss_profile_md(user_id: int) -> str:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT boss_profile_md FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        return (row["boss_profile_md"] if row else "") or ""
+
+
+def set_boss_profile_md(user_id: int, markdown: str) -> None:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET boss_profile_md=?, boss_profile_updated_at=? WHERE id=?",
+            (markdown, now, user_id),
+        )
+
+
+def get_boss_profile_updated_at(user_id: int) -> str | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT boss_profile_updated_at FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        return (row["boss_profile_updated_at"] if row else None)
 
 
 # --- Submit count (for self-learning harness) ---

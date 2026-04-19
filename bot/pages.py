@@ -2,6 +2,8 @@
 
 from datetime import date
 
+from .voice import default_voice
+
 # Populated by server.run() after tg_app.initialize() resolves the bot username
 # via getMe. Pages fall back to a generic label if the bot isn't up yet.
 BOT_USERNAME: str | None = None
@@ -12,15 +14,17 @@ def _bot_link_html() -> tuple[str, str]:
     if BOT_USERNAME:
         return f"@{BOT_USERNAME}", f"https://t.me/{BOT_USERNAME}"
     # fallback while tg_app is still initializing or in a Lark-only deploy
-    return "Janai on Telegram", "https://t.me/"
+    return default_voice().text("telegram_fallback_handle_text"), "https://t.me/"
 
 
 def styled_page(title: str, body_html: str) -> str:
+    voice = default_voice()
+    brand_name = voice.text("brand_name")
     return f"""<!doctype html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<title>Janai — {title}</title>
+<title>{brand_name} — {title}</title>
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#1a1a2e;
@@ -53,7 +57,7 @@ def styled_page(title: str, body_html: str) -> str:
 <div class="card">
   {body_html}
   <div class="footer">
-    <a href="/">Janai</a> · <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> ·
+    <a href="/">{brand_name}</a> · <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a> ·
     <a href="https://github.com/seahyc/expensebot">GitHub</a>
   </div>
 </div>
@@ -62,8 +66,9 @@ def styled_page(title: str, body_html: str) -> str:
 
 def extension_page() -> str:
     handle, link = _bot_link_html()
+    brand_name = default_voice().text("brand_name")
     return styled_page("Chrome Extension", f"""
-  <h1>💰 Janai</h1>
+  <h1>💰 {brand_name}</h1>
   <div class="sub">Chrome Extension</div>
 
   <p>This extension connects your OmniHR login to
@@ -115,7 +120,7 @@ def extension_page() -> str:
     <div class="step-text">
       <strong>Pin the 💰 icon to your Chrome toolbar.</strong><br>
       <span style="font-size:13px;color:#999">Click the puzzle-piece icon near
-      your Chrome toolbar, find <em>Janai</em>, click the pin next to it.
+      your Chrome toolbar, find <em>{brand_name}</em>, click the pin next to it.
       The 💰 icon should appear in your toolbar.</span>
     </div>
   </div>
@@ -145,7 +150,7 @@ def extension_page() -> str:
 
   <p style="font-size:13px;color:#999"><strong>Can't find the 💰 icon:</strong>
   click the puzzle-piece icon (top-right of Chrome, left of your profile picture),
-  find <em>Janai</em>, and click the pin. If <em>Janai</em> isn't listed,
+  find <em>{brand_name}</em>, and click the pin. If <em>{brand_name}</em> isn't listed,
   install didn't succeed — go back to <code>chrome://extensions</code> and confirm
   it's there and enabled.</p>
 
@@ -153,23 +158,24 @@ def extension_page() -> str:
 
   <h2>What it does</h2>
   <p>Reads your OmniHR session cookies after you sign in normally (Google SSO).
-  Sends them encrypted to Janai so she can file claims on your behalf.
+  Sends them encrypted to {brand_name} so the bot can file claims on your behalf.
   No passwords stored.</p>
 """)
 
 
 def terms_page() -> str:
+    brand_name = default_voice().text("brand_name")
     return styled_page("Terms", f"""
-  <h1>💰 Janai</h1>
+  <h1>💰 {brand_name}</h1>
   <div class="sub">Terms of Service · {date.today().isoformat()}</div>
 
-  <p><strong>What this is.</strong> Janai is an open-source tool
+  <p><strong>What this is.</strong> {brand_name} is an open-source tool
   (<a href="https://github.com/seahyc/expensebot">github.com/seahyc/expensebot</a>)
   that files expense claims into OmniHR on your behalf, via a Telegram or Lark bot
   and a Chrome extension. Provided as-is with no warranty.</p>
 
   <h2>Your account with your employer</h2>
-  <p>You're responsible for anything Janai files using your OmniHR session.
+  <p>You're responsible for anything {brand_name} files using your OmniHR session.
   If your company's policy prohibits third-party automation, don't use this.
   The bot acts with your credentials.</p>
 
@@ -178,7 +184,7 @@ def terms_page() -> str:
   (it's a <code>git clone</code> + <code>docker compose up</code>).</p>
 
   <h2>No guarantees</h2>
-  <p>If Janai misclassifies, files wrong amounts, or misses a claim, it's
+  <p>If {brand_name} misclassifies, files wrong amounts, or misses a claim, it's
   your job to review and correct. Always check the OmniHR dashboard.</p>
 
   <h2>We can stop serving you</h2>
@@ -189,8 +195,9 @@ def terms_page() -> str:
 
 
 def privacy_page() -> str:
+    brand_name = default_voice().text("brand_name")
     return styled_page("Privacy", f"""
-  <h1>💰 Janai</h1>
+  <h1>💰 {brand_name}</h1>
   <div class="sub">Privacy Policy · {date.today().isoformat()}</div>
 
   <h2>What we collect</h2>
@@ -245,11 +252,13 @@ def privacy_page() -> str:
 
 def landing_page() -> str:
     handle, link = _bot_link_html()
+    voice = default_voice()
+    brand_name = voice.text("brand_name")
     return styled_page("Home", f"""
-  <h1>💰 Janai</h1>
-  <div class="sub">Your expense-claim secretary on Telegram</div>
+  <h1>💰 {brand_name}</h1>
+  <div class="sub">{voice.text("landing_subtitle")}</div>
 
-  <p>Send a receipt photo or PDF → Janai reads it with AI → files as a draft on OmniHR.
+  <p>Send a receipt photo or PDF → {brand_name} reads it with AI → files as a draft on OmniHR.
   Track status, submit for approval, answer questions about your expenses — all from your phone.</p>
 
   <a class="btn" href="{link}" target="_blank">💬 Chat with {handle} on Telegram →</a>

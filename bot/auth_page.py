@@ -11,12 +11,16 @@ Flow:
   7. Page shows "✅ Done! Go back to Telegram."
 """
 
+from .voice import default_voice
+
+_BRAND_NAME = default_voice().text("brand_name")
+
 AUTH_START_HTML = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Janai — Sign in with Claude</title>
+<title>""" + _BRAND_NAME + """ — Sign in with Claude</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -47,7 +51,7 @@ AUTH_START_HTML = """<!doctype html>
 </head>
 <body>
 <div class="card" id="main">
-  <h1>💰 Janai</h1>
+  <h1>💰 """ + _BRAND_NAME + """</h1>
   <p>Sign in with your Claude subscription to parse receipts.</p>
 
   <div id="step1">
