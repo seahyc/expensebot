@@ -17,6 +17,7 @@ Requires-Dist: boto3>=1.35
 Requires-Dist: stripe>=10
 Requires-Dist: pynacl>=1.5
 Requires-Dist: structlog>=24
+Requires-Dist: claude-agent-sdk>=0.1
 Provides-Extra: dev
 Requires-Dist: pytest>=8; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.24; extra == "dev"

@@ -169,11 +169,11 @@ async def run_review(
             missing = _validate_user_md(text)
             if missing:
                 log.warning(
-                    "learning: proposed user_md missing headers %s for user=%s (attempt %d) — skipping",
+                    "learning: proposed user_md missing headers %s for user=%s (attempt %d) — retrying",
                     missing, user_id, attempt + 1,
                 )
-                # Don't retry on validation failure — the model made a structural error
-                return
+                # Retry on validation failure (max 4 attempts total)
+                continue
 
             # Write the new user_md
             db.set_user_md(user_id, text)

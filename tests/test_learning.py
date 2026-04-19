@@ -368,14 +368,18 @@ async def test_run_review_claude_error(mock_anthropic, tmp_db):
 
 @pytest.mark.asyncio
 async def test_run_review_max_4_calls(mock_anthropic, tmp_db):
-    """run_review should call Claude at most 4 times total (currently it stops
-    on first result, but the cap is there as a safety net)."""
+    """When all attempts produce invalid output, Claude is called at most 4 times."""
     uid = storage.upsert_user("telegram", "u1")
 
-    # Return something that looks valid but actually goes through the loop once
-    mock_anthropic.messages.create.return_value = _make_response("NOTHING_NEW")
+    # Return structurally invalid (not NOTHING_NEW, missing headers) every time
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(type="text", text="This is not valid user_md")]
+    mock_anthropic.messages.create = AsyncMock(return_value=mock_response)
 
-    await learning.run_review(uid, storage, mock_anthropic, [])
-
-    # Should have stopped after 1 call (NOTHING_NEW returned immediately)
-    assert mock_anthropic.messages.create.call_count == 1
+    await learning.run_review(
+        user_id=uid,
+        db=storage,
+        anthropic_client=mock_anthropic,
+        recent_messages=[],
+    )
+    assert mock_anthropic.messages.create.call_count == 4
