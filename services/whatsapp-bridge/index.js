@@ -169,8 +169,9 @@ async function startSession(sessionId) {
   const sock = makeWASocket({
     version,
     auth: authState,
-    logger: pino({ level: "silent" }), // suppress noisy baileys logs
+    logger: pino({ level: "silent" }),
     printQRInTerminal: false,
+    syncFullHistory: true, // request full message history on connect
   });
 
   state.socket = sock;
