@@ -25,6 +25,7 @@ const waStatusEl = document.getElementById("wa-status");
 const waStep1El = document.getElementById("wa-step1");
 const waQrContainer = document.getElementById("wa-qr-container");
 const waQrImg = document.getElementById("wa-qr");
+const waQrLoading = document.getElementById("wa-qr-loading");
 const waCodeEl = document.getElementById("wa-code");
 const waInitBtn = document.getElementById("wa-init");
 
@@ -259,7 +260,11 @@ function startWaQrPoll(pairingCode) {
         clearInterval(waPolling); waPolling = null;
         await refreshStatus(); return;
       }
-      if (data.qr) waQrImg.src = data.qr;
+      if (data.qr) {
+        waQrImg.src = data.qr;
+        waQrImg.style.display = "block";
+        waQrLoading.style.display = "none";
+      }
     } catch (_) {}
   }, 3000);
 }
