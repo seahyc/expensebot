@@ -63,6 +63,7 @@ from . import access, claude_oauth, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
 from .common.parser import ParsedReceipt, parse_receipt
+from .common.pipeline import format_dupe_warning, match_dupes
 
 logging_setup.setup()
 log = logging.getLogger("expensebot")
@@ -1082,9 +1083,23 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     recent_claims_summary="",
                     active_trip=None,
                 )
-                return json.dumps(parsed.raw, default=str)
             except Exception as e:
                 return f"Parse failed: {e}"
+
+            # Dupe sniff — best-effort; failure must not block the parse result.
+            dupe_warning = ""
+            try:
+                async with client_for(u) as client:
+                    recent = await client.list_submissions(page_size=60)
+                hints = match_dupes(parsed, recent.get("results", []))
+                dupe_warning = format_dupe_warning(hints)
+            except Exception as e:
+                log.warning("dupe sniff failed: %s", e)
+
+            parsed_json = json.dumps(parsed.raw, default=str)
+            if dupe_warning:
+                return f"{dupe_warning}\n\n---\n\n{parsed_json}"
+            return parsed_json
 
         elif tool_name == "list_claims":
             status_key = tool_input.get("status", "all")

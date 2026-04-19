@@ -104,7 +104,7 @@ async def file_receipt(
     file_dupes = await parse_cache.dupes(user_db_id, sha)
 
     # Parsed-tuple dupes (different file, same merchant + date + amount)
-    parsed_dupes = _match_dupes(parsed, recent_subs_task.result())
+    parsed_dupes = match_dupes(parsed, recent_subs_task.result())
 
     needs_input = _low_confidence_fields(parsed)
 
@@ -168,7 +168,7 @@ def _low_confidence_fields(p: ParsedReceipt) -> list[str]:
     return out
 
 
-def _match_dupes(parsed: ParsedReceipt, recent_subs: list[dict[str, Any]]) -> list[DupeHint]:
+def match_dupes(parsed: ParsedReceipt, recent_subs: list[dict[str, Any]]) -> list[DupeHint]:
     if not parsed.amount or not parsed.receipt_date:
         return []
     out = []
@@ -188,6 +188,25 @@ def _match_dupes(parsed: ParsedReceipt, recent_subs: list[dict[str, Any]]) -> li
                 )
             )
     return out
+
+
+def format_dupe_warning(hints: list[DupeHint]) -> str:
+    """Format dupe hints as a prompt-ready warning block for the agent.
+    Returned string is empty when there are no dupes — caller can concat
+    unconditionally."""
+    if not hints:
+        return ""
+    lines = ["⚠ POSSIBLE DUPLICATE(S) — same amount/date/merchant already on OmniHR:"]
+    for h in hints:
+        lines.append(
+            f"- #{h.submission_id} {h.receipt_date.isoformat()} "
+            f"{h.merchant or '?'} {h.amount} (status={h.status})"
+        )
+    lines.append(
+        "If this is the same transaction, warn the user before filing. "
+        "If they confirm it's a separate charge, proceed."
+    )
+    return "\n".join(lines)
 
 
 async def _recent_claims_summary(submissions_cache, user_db_id: int) -> str:
