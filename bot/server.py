@@ -1553,7 +1553,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
 
 async def _keep_typing(bot, chat_id: int, stop_event: asyncio.Event) -> None:
     """Send typing action every 4s until stop_event is set."""
-    from telegram import ChatAction
+    from telegram.constants import ChatAction
     while not stop_event.is_set():
         try:
             await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)

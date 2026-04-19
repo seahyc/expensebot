@@ -184,13 +184,11 @@ async function startSession(sessionId) {
     }
   });
 
-  sock.ev.on("messages.upsert", ({ messages, type }) => {
-    if (type !== "notify") return;
-
+  function storeMessages(msgs, source) {
     const now = Math.floor(Date.now() / 1000);
-
-    for (const msg of messages) {
-      // Skip status updates, broadcast messages, and non-text messages
+    let count = 0;
+    for (const msg of msgs) {
+      if (!msg.message) continue;
       if (msg.key.remoteJid === "status@broadcast") continue;
       if (isJidBroadcast(msg.key.remoteJid || "")) continue;
 
@@ -209,10 +207,21 @@ async function startSession(sessionId) {
 
       try {
         insertMsg.run(sessionId, chatJid, senderJid, timestamp, text);
+        count++;
       } catch (e) {
         log.error({ sessionId, err: e.message }, "failed to insert message");
       }
     }
+    if (count > 0) log.info({ sessionId, source, count }, "stored messages");
+  }
+
+  sock.ev.on("messaging-history.set", ({ messages: historyMsgs }) => {
+    storeMessages(historyMsgs || [], "history-sync");
+  });
+
+  sock.ev.on("messages.upsert", ({ messages, type }) => {
+    if (type !== "notify") return;
+    storeMessages(messages, "notify");
   });
 }
 
