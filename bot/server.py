@@ -63,6 +63,7 @@ from omnihr_client.schema import invalidate_schema
 from . import access, claude_oauth, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
+from .common import context_lookup
 from .common.context_lookup import triangulate
 from .common.parser import ParsedReceipt, parse_receipt
 from .common.pipeline import format_dupe_warning, match_dupes
@@ -1029,8 +1030,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         parsed = pending.parsed
         try:
-            from datetime import datetime as _dt
-            dt = _dt.combine(parsed.receipt_date, _dt.min.time()) if parsed.receipt_date else _dt.utcnow()
+            SGT = timezone(timedelta(hours=8))
+            from datetime import time as _time
+            dt = datetime.combine(parsed.receipt_date, _time(12, 0), tzinfo=SGT) if parsed.receipt_date else datetime.now(SGT)
             result = await asyncio.wait_for(
                 triangulate(
                     merchant=parsed.merchant or "",
@@ -1320,6 +1322,27 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     f"status={sl}"
                 )
             return f"Claims ({len(rows)} total):\n" + "\n".join(lines)
+
+        elif tool_name == "search_email_context":
+            merchant = tool_input.get("merchant", "")
+            date_hint = tool_input.get("date_hint", "")
+            time_hint = tool_input.get("time_hint", "")
+            try:
+                dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
+            except ValueError:
+                dt = datetime.now()
+            results = await asyncio.wait_for(context_lookup.gmail_context(merchant, dt), timeout=5.0)
+            return "\n".join(results) if results else "No relevant emails found."
+
+        elif tool_name == "search_calendar_context":
+            date_hint = tool_input.get("date_hint", "")
+            time_hint = tool_input.get("time_hint", "")
+            try:
+                dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
+            except ValueError:
+                dt = datetime.now()
+            results = await asyncio.wait_for(context_lookup.gcal_context(dt), timeout=5.0)
+            return "\n".join(results) if results else "No calendar events found near this time."
 
         return f"Unknown tool: {tool_name}"
 
@@ -1618,8 +1641,9 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         triangulation_md: str | None = None
         if parsed.merchant and parsed.receipt_date:
             try:
-                from datetime import datetime as _dt
-                receipt_dt = _dt.combine(parsed.receipt_date, _dt.min.time())
+                SGT = timezone(timedelta(hours=8))
+                from datetime import time as _time
+                receipt_dt = datetime.combine(parsed.receipt_date, _time(12, 0), tzinfo=SGT)
                 tri_result = await asyncio.wait_for(
                     triangulate(
                         merchant=parsed.merchant,

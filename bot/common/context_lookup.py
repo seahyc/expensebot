@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 log = logging.getLogger(__name__)
 
 # Path to gw binary — resolved once at import time.
-_GW_PATH: str | None = shutil.which("gw") or "/Users/yingcong/.local/bin/gw"
+_GW_PATH: str | None = shutil.which("gw")
 
 _SUBPROCESS_TIMEOUT = 2.0  # seconds
 
