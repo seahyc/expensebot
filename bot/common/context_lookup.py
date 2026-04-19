@@ -156,13 +156,48 @@ def _fmt_date_for_gmail(dt: datetime) -> str:
     return dt.strftime("%Y/%m/%d")
 
 
+def _extract_text_body(payload: dict, max_chars: int = 500) -> str:
+    """Recursively extract plain-text body from a Gmail message payload."""
+    import base64
+    mime = payload.get("mimeType", "")
+    if mime == "text/plain":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            try:
+                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")[:max_chars]
+            except Exception:
+                pass
+    for part in payload.get("parts", []):
+        text = _extract_text_body(part, max_chars)
+        if text:
+            return text
+    return ""
+
+
+def _extract_attachments(payload: dict) -> list[str]:
+    """Return list of 'filename (mime)' strings for all non-inline attachments."""
+    results = []
+    if payload.get("body", {}).get("attachmentId") and payload.get("filename"):
+        mime = payload.get("mimeType", "")
+        size = payload.get("body", {}).get("size", 0)
+        size_str = f"{size // 1024}KB" if size >= 1024 else f"{size}B"
+        results.append(f"{payload['filename']} ({mime}, {size_str})")
+    for part in payload.get("parts", []):
+        results.extend(_extract_attachments(part))
+    return results
+
+
 async def gmail_context(
     merchant: str,
     dt: datetime,
     user_id: int | None = None,
     window_days: int = 3,
 ) -> list[str]:
-    """Search Gmail across all connected Google accounts."""
+    """Search Gmail across all connected Google accounts.
+
+    Returns rich per-message summaries including subject, sender, date,
+    body excerpt, and attachment filenames.
+    """
     if user_id is None:
         return []
 
@@ -188,25 +223,57 @@ async def gmail_context(
     results: list[str] = []
 
     async with httpx.AsyncClient() as client:
-        for email, access_token in tokens:
+        for _email, access_token in tokens:
+            headers = {"Authorization": f"Bearer {access_token}"}
             try:
+                # 1. List matching messages (not threads — messages give us direct access)
                 r = await client.get(
-                    "https://gmail.googleapis.com/gmail/v1/users/me/threads",
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages",
                     params={"q": query, "maxResults": max_results},
-                    headers={"Authorization": f"Bearer {access_token}"},
+                    headers=headers,
                     timeout=_API_TIMEOUT,
                 )
                 if r.status_code != 200:
-                    log.warning("Gmail API error for %s: %s", email, r.status_code)
+                    log.warning("Gmail API error for %s: %s", _email, r.status_code)
                     continue
-                for t in r.json().get("threads", []):
-                    tid = t.get("id", "")
-                    snippet = t.get("snippet", "")[:120]
-                    if tid and tid not in seen and snippet:
-                        seen.add(tid)
-                        results.append(snippet)
+
+                for msg_ref in r.json().get("messages", []):
+                    msg_id = msg_ref["id"]
+                    if msg_id in seen:
+                        continue
+                    seen.add(msg_id)
+
+                    # 2. Fetch full message (headers + body + attachment metadata)
+                    mr = await client.get(
+                        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                        params={"format": "full"},
+                        headers=headers,
+                        timeout=_API_TIMEOUT * 2,
+                    )
+                    if mr.status_code != 200:
+                        continue
+                    msg = mr.json()
+
+                    # Extract headers
+                    hdr = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+                    subject = hdr.get("subject", "(no subject)")[:100]
+                    sender = hdr.get("from", "unknown")[:80]
+                    date = hdr.get("date", "")[:30]
+
+                    # Extract body and attachments
+                    payload = msg.get("payload", {})
+                    body = _extract_text_body(payload, max_chars=400).strip()
+                    attachments = _extract_attachments(payload)
+
+                    parts = [f"From: {sender}", f"Subject: {subject}", f"Date: {date}"]
+                    if body:
+                        parts.append(f"Body: {body}")
+                    if attachments:
+                        parts.append(f"Attachments: {', '.join(attachments)}")
+                    results.append("\n".join(parts))
+
             except Exception as e:
-                log.warning("gmail_context error for %s: %s", email, e)
+                log.warning("gmail_context error for %s: %s", _email, e)
 
     return results[:max_results * len(tokens)]
 
