@@ -1516,11 +1516,10 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             return "\n".join(all_msgs) if all_msgs else f"No Telegram messages found in the last {days} days."
 
         elif tool_name == "list_telegram_chats":
-            days = int(tool_input.get("days", 30))
+            limit = int(tool_input.get("days", 20))  # reuse "days" param as count for compat
             tg_accounts = storage.get_telegram_accounts(u["id"])
             if not tg_accounts:
                 return "Telegram is not connected."
-            since = datetime.now(timezone.utc) - timedelta(days=days)
             from .common.telegram_reader import list_chats as _tg_list_chats
             all_chats: list[dict] = []
             for _acct in tg_accounts:
@@ -1528,15 +1527,17 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                 if not sess:
                     continue
                 try:
-                    chats = await asyncio.wait_for(_tg_list_chats(sess, since), timeout=25.0)
+                    chats = await asyncio.wait_for(_tg_list_chats(sess, max_dialogs=limit), timeout=25.0)
                     all_chats.extend(chats)
                 except (asyncio.TimeoutError, Exception) as e:
                     return f"(Telegram list_chats error: {e})"
             if not all_chats:
-                return f"No Telegram chats with activity in the last {days} days."
-            lines = [f"Telegram chats (last {days} days):"]
-            for c in all_chats[:30]:
-                lines.append(f"- **{c['name']}** ({c['type']}) — {c['count']} messages | last: {c['last_message'][:60]}")
+                return "No Telegram chats found."
+            lines = ["Recent Telegram chats (most active first):"]
+            for i, c in enumerate(all_chats[:30], 1):
+                date_str = f" [{c['last_date']}]" if c['last_date'] else ""
+                last = f" — \"{c['last_message'][:70]}\"" if c['last_message'] else ""
+                lines.append(f"{i}. **{c['name']}** ({c['type']}){date_str}{last}")
             return "\n".join(lines)
 
         elif tool_name == "get_telegram_chat":

@@ -191,47 +191,44 @@ async def fetch_recent_messages(
 
 async def list_chats(
     session_str: str,
-    since: datetime,
-    max_dialogs: int = 50,
+    since: datetime | None = None,
+    max_dialogs: int = 30,
     skip_bots: bool = True,
 ) -> list[dict]:
-    """Return a list of chats that had activity since `since`.
+    """Return recent chats sorted by last activity (same order as Telegram sidebar).
 
-    Each entry: {name, type, count, last_message}
+    Each entry: {name, type, last_message, last_date}
+    `since` is ignored — all top-N dialogs are returned regardless of read status.
     """
     client = _make_client(session_str)
-    if since.tzinfo is None:
-        since = since.replace(tzinfo=timezone.utc)
-
     results: list[dict] = []
     try:
         await client.connect()
+        # get_dialogs returns chats sorted by most recent activity — no filtering needed
         dialogs = await client.get_dialogs(limit=max_dialogs)
         for dialog in dialogs:
             try:
                 entity = dialog.entity
-                # Skip bots if requested
                 if skip_bots and getattr(entity, "bot", False):
                     continue
-                count = 0
+                chat_type = (
+                    "group" if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
+                    else "channel" if getattr(entity, "broadcast", False)
+                    else "dm"
+                )
+                # dialog.message is the most recent message — no extra API call needed
                 last_text = ""
-                async for msg in client.iter_messages(dialog.entity, limit=50):
-                    if msg.date and msg.date.replace(tzinfo=timezone.utc) < since:
-                        break
-                    if msg.text:
-                        count += 1
-                        if not last_text:
-                            last_text = msg.text[:80]
-                if count > 0:
-                    chat_type = "group" if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False) else (
-                        "channel" if getattr(entity, "broadcast", False) else "dm"
-                    )
-                    results.append({
-                        "name": dialog.name or "unknown",
-                        "type": chat_type,
-                        "count": count,
-                        "last_message": last_text,
-                    })
+                last_date = ""
+                if dialog.message and getattr(dialog.message, "text", None):
+                    last_text = dialog.message.text[:100]
+                    if dialog.message.date:
+                        last_date = dialog.message.date.strftime("%m-%d %H:%M")
+                results.append({
+                    "name": dialog.name or "unknown",
+                    "type": chat_type,
+                    "last_message": last_text,
+                    "last_date": last_date,
+                })
             except Exception:
                 continue
     except Exception as e:
@@ -243,7 +240,6 @@ async def list_chats(
         except Exception:
             pass
 
-    results.sort(key=lambda x: x["count"], reverse=True)
     return results
 
 

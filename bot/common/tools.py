@@ -242,17 +242,16 @@ TOOLS = [
     {
         "name": "list_telegram_chats",
         "description": (
-            "List the user's Telegram chats that had activity recently. "
-            "Returns chat names, types, and message counts. "
-            "Call this first when the user asks about a specific person — "
-            "it tells you which chat name to use with get_telegram_chat."
+            "List the user's most recently active Telegram chats, sorted by last activity "
+            "(same order as the Telegram sidebar — includes read chats, not just unread). "
+            "Call this to find chat names before using get_telegram_chat."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "days": {
                     "type": "integer",
-                    "description": "How many days back to look for activity. Default: 30.",
+                    "description": "How many chats to return (default: 20).",
                 },
             },
             "required": [],
