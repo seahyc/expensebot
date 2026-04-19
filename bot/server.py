@@ -325,7 +325,6 @@ async def _gate(update: Update) -> bool:
 # Telegram handlers
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT_MD = (REPO_ROOT / "bot" / "system_prompt.md").read_text()
 SKILLS_DIR = REPO_ROOT / "bot" / "skills"
 
 # Load plugin skills and tools at startup — all disabled by default.
