@@ -13,6 +13,7 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   isJidBroadcast,
+  makeInMemoryStore,
 } = require("@whiskeysockets/baileys");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -72,13 +73,15 @@ setInterval(pruneOldMessages, 24 * 60 * 60 * 1000);
 // Session state
 // ---------------------------------------------------------------------------
 
-// session_id (string) -> { socket, qr, connected, phone, reconnecting }
+// session_id (string) -> { socket, store, qr, connected, phone, reconnecting }
 const sessions = new Map();
 
 function getOrCreateSessionState(sessionId) {
   if (!sessions.has(sessionId)) {
+    const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
     sessions.set(sessionId, {
       socket: null,
+      store,
       qr: null,
       connected: false,
       phone: null,
@@ -161,6 +164,9 @@ async function startSession(sessionId) {
 
   state.socket = sock;
   state.reconnecting = false;
+
+  // Bind in-memory store so it tracks chats, contacts, messages
+  state.store.bind(sock.ev);
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -253,15 +259,21 @@ async function startSession(sessionId) {
     storeMessages(messages, "notify");
   });
 
-  // chats.upsert fires with the full chat list on connect — use it to backfill history
+  // chats.upsert fires as chats arrive — trigger backfill once we have a good list
+  let backfillScheduled = false;
   sock.ev.on("chats.upsert", (chats) => {
-    const jids = chats.map((c) => c.id).filter(Boolean);
-    if (jids.length > 0) {
+    if (backfillScheduled) return;
+    backfillScheduled = true;
+    // Wait 8s for more chats to accumulate before backfilling
+    setTimeout(() => {
+      const allJids = Object.keys(state.store.chats.all ? state.store.chats.all() : {});
+      const fromEvent = chats.map((c) => c.id).filter(Boolean);
+      const jids = allJids.length > 0 ? allJids : fromEvent;
       log.info({ sessionId, count: jids.length }, "chats.upsert: triggering history backfill");
       syncChatsHistory(sessionId, jids).catch((e) =>
         log.warn({ sessionId, err: e.message }, "syncChatsHistory error")
       );
-    }
+    }, 8000);
   });
 }
 
