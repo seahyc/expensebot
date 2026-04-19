@@ -254,20 +254,33 @@ async function startSession(sessionId) {
     storeMessages(messages, "notify");
   });
 
-  // chats.upsert fires as chat list arrives — accumulate JIDs, backfill once after 10s
+  // contacts.upsert fires with full contact list on connect — use JIDs for backfill
+  // chats.upsert also accumulated for completeness
   let backfillTimer = null;
-  sock.ev.on("chats.upsert", (chats) => {
-    for (const c of chats) {
-      if (c.id) state.knownJids.add(c.id);
-    }
+  function scheduleBackfill() {
     if (backfillTimer) clearTimeout(backfillTimer);
     backfillTimer = setTimeout(() => {
       const jids = [...state.knownJids];
-      log.info({ sessionId, count: jids.length }, "chats.upsert: triggering history backfill");
+      if (!jids.length) return;
+      log.info({ sessionId, count: jids.length }, "triggering history backfill");
       syncChatsHistory(sessionId, jids).catch((e) =>
         log.warn({ sessionId, err: e.message }, "syncChatsHistory error")
       );
-    }, 10000);
+    }, 8000);
+  }
+
+  sock.ev.on("contacts.upsert", (contacts) => {
+    for (const c of contacts) {
+      if (c.id && !c.id.endsWith("@broadcast")) state.knownJids.add(c.id);
+    }
+    scheduleBackfill();
+  });
+
+  sock.ev.on("chats.upsert", (chats) => {
+    for (const c of chats) {
+      if (c.id && !c.id.endsWith("@broadcast")) state.knownJids.add(c.id);
+    }
+    scheduleBackfill();
   });
 }
 
