@@ -120,6 +120,53 @@ TOOLS = [
         },
     },
     {
+        "name": "search_email_context",
+        "description": (
+            "Search Gmail for emails related to a merchant or event around a given date. "
+            "Call this when the user asks a follow-up about what emails might explain a receipt, "
+            "or when they want to verify the business purpose of an expense."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "merchant": {
+                    "type": "string",
+                    "description": "Merchant name to search for in email threads",
+                },
+                "date_hint": {
+                    "type": "string",
+                    "description": "Date of the receipt, e.g. '2026-04-15'",
+                },
+                "time_hint": {
+                    "type": "string",
+                    "description": "Optional time of transaction, e.g. '14:30'",
+                },
+            },
+            "required": ["merchant", "date_hint"],
+        },
+    },
+    {
+        "name": "search_calendar_context",
+        "description": (
+            "Search Google Calendar for events near a given date and time. "
+            "Call this when the user asks about what meetings or events might explain a receipt."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_hint": {
+                    "type": "string",
+                    "description": "Date to search around, e.g. '2026-04-15'",
+                },
+                "time_hint": {
+                    "type": "string",
+                    "description": "Optional time to narrow the search, e.g. '14:30'",
+                },
+            },
+            "required": ["date_hint"],
+        },
+    },
+    {
         "name": "update_profile",
         "description": (
             "Rewrite your always-in-context memory of WHO this user is — name, "

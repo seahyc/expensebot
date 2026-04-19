@@ -63,6 +63,7 @@ from omnihr_client.schema import invalidate_schema
 from . import access, claude_oauth, logging_setup, pages, rate_limit, storage
 from .common.agent import run_agent
 from .common.agent_parser import parse_receipt_via_agent
+from .common.context_lookup import triangulate
 from .common.parser import ParsedReceipt, parse_receipt
 from .common.pipeline import format_dupe_warning, match_dupes
 
@@ -718,7 +719,10 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _build_confirm_message(
-    parsed: ParsedReceipt, policies: list[PolicyEntry]
+    parsed: ParsedReceipt,
+    policies: list[PolicyEntry],
+    sha: str | None = None,
+    triangulation_md: str | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Build the confirmation message and keyboard shown after parsing a receipt."""
     lines = [
@@ -734,7 +738,20 @@ def _build_confirm_message(
     if parsed.suggested_sub_category_label:
         lines.append(f"Category: {parsed.suggested_sub_category_label}")
 
+    if triangulation_md:
+        lines.append("")
+        lines.append(triangulation_md)
+
     text = "\n".join(lines)
+
+    # Correction row — always shown as a second row of buttons
+    correction_row = [
+        InlineKeyboardButton("✏️ Edit description", callback_data="edit_desc:"),
+    ]
+    if sha:
+        correction_row.append(
+            InlineKeyboardButton("🔄 Search again", callback_data=f"retriangulate:{sha}")
+        )
 
     if not parsed.suggested_policy_id:
         if policies:
@@ -748,10 +765,11 @@ def _build_confirm_message(
                     row = []
             if row:
                 rows.append(row)
+            rows.append(correction_row)
             rows.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_file")])
         else:
             text += "\n\nI couldn't auto-classify and no policies are available. Try adding a hint as a caption (e.g. 'travel local')."
-            rows = [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_file")]]
+            rows = [correction_row, [InlineKeyboardButton("❌ Cancel", callback_data="cancel_file")]]
         return text, InlineKeyboardMarkup(rows)
 
     policy_label = next(
@@ -759,10 +777,13 @@ def _build_confirm_message(
         f"policy #{parsed.suggested_policy_id}",
     )
     text += f"\nPolicy: *{policy_label}*\n\nFile this as a draft?"
-    return text, InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ File it", callback_data="confirm_file"),
-        InlineKeyboardButton("❌ Cancel", callback_data="cancel_file"),
-    ]])
+    return text, InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ File it", callback_data="confirm_file"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_file"),
+        ],
+        correction_row,
+    ])
 
 
 async def _do_file_draft(q: Any, chat_id: int, policy_id: int) -> None:
@@ -945,6 +966,63 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 await q.answer("Bad policy ID", show_alert=True)
                 return
         await _do_file_draft(q, chat_id, policy_id)
+        return
+
+    if action == "edit_desc":
+        await q.answer()
+        chat_id = q.message.chat_id if q.message else q.from_user.id
+        pending = _pending_files.get(chat_id)
+        if not pending:
+            try:
+                await q.edit_message_text("No pending receipt — please resend the file.")
+            except Exception:
+                pass
+            return
+        try:
+            await q._bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "Send me the corrected description as a reply, darling. "
+                    "I'll update it before filing. ✏️"
+                ),
+            )
+        except Exception as e:
+            log.warning("edit_desc send failed: %s", e)
+        return
+
+    if action == "retriangulate":
+        await q.answer("Searching again…")
+        chat_id = q.message.chat_id if q.message else q.from_user.id
+        pending = _pending_files.get(chat_id)
+        if not pending:
+            try:
+                await q.edit_message_text("No pending receipt — please resend the file.")
+            except Exception:
+                pass
+            return
+        parsed = pending.parsed
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.combine(parsed.receipt_date, _dt.min.time()) if parsed.receipt_date else _dt.utcnow()
+            result = await asyncio.wait_for(
+                triangulate(
+                    merchant=parsed.merchant or "",
+                    dt=dt,
+                    receipt_type="other",
+                ),
+                timeout=5.0,
+            )
+            tri_md = result.as_markdown()
+        except Exception as e:
+            log.warning("retriangulate failed: %s", e)
+            tri_md = None
+        confirm_text, confirm_kb = _build_confirm_message(
+            parsed, pending.policies, sha=pending.sha, triangulation_md=tri_md
+        )
+        try:
+            await q.edit_message_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
+        except Exception as e:
+            log.warning("retriangulate edit failed: %s", e)
         return
 
     if not u or not u.get("access_jwt"):
@@ -1508,6 +1586,27 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.edit_text("That doesn't look like a receipt — anything else?")
             return
 
+        # Run triangulation (Gmail + Calendar) in parallel with a 2-second budget.
+        # This is best-effort — never block filing on it.
+        triangulation_md: str | None = None
+        if parsed.merchant and parsed.receipt_date:
+            try:
+                from datetime import datetime as _dt
+                receipt_dt = _dt.combine(parsed.receipt_date, _dt.min.time())
+                tri_result = await asyncio.wait_for(
+                    triangulate(
+                        merchant=parsed.merchant,
+                        dt=receipt_dt,
+                        receipt_type="other",
+                    ),
+                    timeout=2.0,
+                )
+                triangulation_md = tri_result.as_markdown()
+            except asyncio.TimeoutError:
+                log.debug("triangulation timed out — proceeding without context")
+            except Exception as e:
+                log.warning("triangulation failed: %s", e)
+
         # Store pending state and show confirmation / policy picker
         chat_id = msg.chat_id
         _pending_files[chat_id] = _PendingFile(
@@ -1523,7 +1622,9 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             policies=policies,
             user_note=user_note,
         )
-        confirm_text, confirm_kb = _build_confirm_message(parsed, policies)
+        confirm_text, confirm_kb = _build_confirm_message(
+            parsed, policies, sha=sha, triangulation_md=triangulation_md
+        )
         storage.log_message(u["id"], "out", confirm_text)
         await progress.edit_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
 

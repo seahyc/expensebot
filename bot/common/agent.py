@@ -154,6 +154,7 @@ def build_context_text(
     recent_claims: str,
     has_file: bool,
     user_message: str,
+    triangulation_md: str | None = None,
 ) -> str:
     about_block = (
         f"## About you\n{profile_md}\n\n"
@@ -168,6 +169,11 @@ def build_context_text(
         if merchants_rendered
         else ""
     )
+    triangulation_block = (
+        f"{triangulation_md}\n\n"
+        if triangulation_md
+        else ""
+    )
     return (
         f"## Org config\n{tenant_md[:2000]}\n\n"
         f"{about_block}"
@@ -175,6 +181,7 @@ def build_context_text(
         f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
         f"{merchants_block}"
         f"## Recent claims\n{recent_claims[:1500]}\n\n"
+        f"{triangulation_block}"
         f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
         f"## User message\n{user_message}"
     )
