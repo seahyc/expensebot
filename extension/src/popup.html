@@ -14,6 +14,8 @@
     button { width: 100%; padding: 8px; background: #1a73e8; color: white; border: 0; border-radius: 4px; font-size: 14px; cursor: pointer; }
     button:disabled { background: #aac4eb; cursor: default; }
     .small { font-size: 11px; color: #666; margin-top: 8px; }
+    .account-pill { display:flex; align-items:center; justify-content:space-between; padding:6px 8px; background:#f1f3f4; border-radius:4px; margin-bottom:6px; font-size:12px; }
+    .account-pill .remove-btn { background:none; border:none; color:#c5221f; cursor:pointer; font-size:14px; padding:0; width:auto; line-height:1; }
   </style>
 </head>
 <body>
@@ -24,20 +26,20 @@
   <div class="small">Get a code from your bot with <code>/connect_omnihr</code>.</div>
 
   <hr style="margin: 14px 0; border: none; border-top: 1px solid #e0e0e0;">
-
   <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Gmail &amp; Calendar</div>
-  <div id="google-status" class="status warn">Not connected</div>
-  <input id="google-code" placeholder="6-digit code from /connect_google" maxlength="6" autocomplete="off">
-  <button id="google-connect">Connect Google</button>
+  <div id="google-accounts-list"></div>
+  <div id="google-add-form">
+    <input id="google-code" placeholder="6-digit code from /connect_google" maxlength="6" autocomplete="off">
+    <button id="google-connect">Add Google Account</button>
+  </div>
   <div class="small">Run <code>/connect_google</code> in your bot to get a code.</div>
 
   <hr style="margin: 14px 0; border: none; border-top: 1px solid #e0e0e0;">
-
   <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Telegram Messages</div>
-  <div id="tg-status" class="status warn">Not connected</div>
+  <div id="tg-accounts-list"></div>
   <div id="tg-step1">
     <input id="tg-code" placeholder="6-digit code from /connect_telegram" maxlength="6" autocomplete="off">
-    <button id="tg-init">Connect Telegram</button>
+    <button id="tg-init">Add Telegram Account</button>
     <div class="small">Run <code>/connect_telegram</code> in bot, tap "Share my number", then paste the code above.</div>
   </div>
   <div id="tg-step2" style="display:none">
@@ -46,12 +48,11 @@
   </div>
 
   <hr style="margin: 14px 0; border: none; border-top: 1px solid #e0e0e0;">
-
   <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">WhatsApp Messages</div>
-  <div id="wa-status" class="status warn">Not connected</div>
+  <div id="wa-accounts-list"></div>
   <div id="wa-step1">
     <input id="wa-code" placeholder="6-digit code from /connect_whatsapp" maxlength="6" autocomplete="off">
-    <button id="wa-init">Connect WhatsApp</button>
+    <button id="wa-init">Add WhatsApp Account</button>
     <div class="small">Run <code>/connect_whatsapp</code> in bot to get a code.</div>
   </div>
   <div id="wa-qr-container" style="display:none; text-align:center;">

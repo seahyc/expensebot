@@ -104,15 +104,26 @@ def render_merchants_block(rows: list[dict]) -> str:
 
 
 def build_integrations_block(user: dict[str, Any]) -> str:
-    lines = []
-    lines.append(f"- Gmail: {'✅ Connected' if user.get('google_access_token') else '⬜ Not connected'}")
-    lines.append(f"- Google Calendar: {'✅ Connected' if user.get('google_access_token') else '⬜ Not connected'}")
-    lines.append(
-        f"- Telegram messages: {'✅ Connected (' + (user.get('telegram_phone') or '') + ')' if user.get('telegram_session') else '⬜ Not connected — /connect_telegram to set up'}"
-    )
-    lines.append(
-        f"- WhatsApp messages: {'✅ Connected (' + (user.get('whatsapp_phone') or '') + ')' if user.get('whatsapp_connected') else '⬜ Not connected — /connect_whatsapp to set up'}"
-    )
+    from .. import storage
+    uid = user.get("id")
+    if uid:
+        google_accts = storage.get_google_accounts(uid)
+        tg_accts = storage.get_telegram_accounts(uid)
+        wa_accts = storage.get_whatsapp_accounts(uid)
+    else:
+        google_accts, tg_accts, wa_accts = [], [], []
+
+    def _fmt(accts, label_key, cmd):
+        if not accts:
+            return f"⬜ Not connected — {cmd} to set up"
+        labels = ", ".join(a[label_key] for a in accts if a.get(label_key))
+        return f"✅ Connected ({labels})" if labels else "✅ Connected"
+
+    lines = [
+        f"- Gmail & Calendar: {_fmt(google_accts, 'email', '/connect_google')}",
+        f"- Telegram: {_fmt(tg_accts, 'phone', '/connect_telegram')}",
+        f"- WhatsApp: {_fmt(wa_accts, 'phone', '/connect_whatsapp')}",
+    ]
     return "## Integrations\n" + "\n".join(lines) + "\n\n"
 
 

@@ -1,4 +1,4 @@
-// Popup logic: detect logged-in omnihr.co session, accept pairing code, push to backend.
+// Popup logic: multi-account support for Google, Telegram, WhatsApp
 
 const DEFAULT_BACKEND = "https://expensebot.seahyingcong.com";
 const BACKEND = await chrome.storage.local.get("backend").then(r => r.backend || DEFAULT_BACKEND);
@@ -8,11 +8,11 @@ const statusEl = document.getElementById("status");
 const codeEl = document.getElementById("code");
 const pairBtn = document.getElementById("pair");
 
-const googleStatusEl = document.getElementById("google-status");
+const googleAccountsList = document.getElementById("google-accounts-list");
 const googleCodeEl = document.getElementById("google-code");
 const googleConnectBtn = document.getElementById("google-connect");
 
-const tgStatusEl = document.getElementById("tg-status");
+const tgAccountsList = document.getElementById("tg-accounts-list");
 const tgStep1El = document.getElementById("tg-step1");
 const tgStep2El = document.getElementById("tg-step2");
 const tgCodeEl = document.getElementById("tg-code");
@@ -20,13 +20,41 @@ const tgInitBtn = document.getElementById("tg-init");
 const tgOtpEl = document.getElementById("tg-otp");
 const tgVerifyBtn = document.getElementById("tg-verify");
 
-const waStatusEl = document.getElementById("wa-status");
+const waAccountsList = document.getElementById("wa-accounts-list");
 const waStep1El = document.getElementById("wa-step1");
 const waQrContainer = document.getElementById("wa-qr-container");
 const waQrImg = document.getElementById("wa-qr");
 const waQrLoading = document.getElementById("wa-qr-loading");
 const waCodeEl = document.getElementById("wa-code");
 const waInitBtn = document.getElementById("wa-init");
+
+// --- Render account pills ---
+function renderPills(container, accounts, labelKey, service, idKey) {
+  container.innerHTML = "";
+  for (const acct of accounts) {
+    const pill = document.createElement("div");
+    pill.className = "account-pill";
+    const label = document.createElement("span");
+    label.textContent = "✅ " + (acct[labelKey] || acct[idKey] || "connected");
+    const btn = document.createElement("button");
+    btn.className = "remove-btn";
+    btn.textContent = "✕";
+    btn.title = "Disconnect";
+    btn.addEventListener("click", async () => {
+      const { ext_session } = await chrome.storage.local.get("ext_session");
+      if (!ext_session) return;
+      try {
+        await fetch(`${BACKEND}/extension/account?service=${service}&account_id=${encodeURIComponent(acct[idKey])}&token=${ext_session}`, { method: "DELETE" });
+        await refreshStatus();
+      } catch (e) {
+        alert("Disconnect failed: " + e.message);
+      }
+    });
+    pill.appendChild(label);
+    pill.appendChild(btn);
+    container.appendChild(pill);
+  }
+}
 
 // --- Status refresh from backend ---
 async function refreshStatus() {
@@ -47,23 +75,22 @@ function applyStatus(s) {
     pairBtn.style.display = "none";
   }
 
-  if (s.google) {
-    googleStatusEl.className = "status ok";
-    googleStatusEl.textContent = `✅ Connected${s.google_email ? " as " + s.google_email : ""}`;
-    googleCodeEl.style.display = "none";
-    googleConnectBtn.style.display = "none";
-  }
+  // Google accounts
+  const gAccounts = s.google_accounts || (s.google ? [{ email: s.google_email || "connected" }] : []);
+  renderPills(googleAccountsList, gAccounts, "email", "google", "email");
 
-  if (s.telegram) {
-    tgStatusEl.className = "status ok";
-    tgStatusEl.textContent = `✅ Connected${s.telegram_phone ? " (" + s.telegram_phone + ")" : ""}`;
+  // Telegram accounts
+  const tgAccounts = s.telegram_accounts || (s.telegram ? [{ phone: s.telegram_phone || "connected" }] : []);
+  renderPills(tgAccountsList, tgAccounts, "phone", "telegram", "phone");
+  if (tgAccounts.length > 0) {
     tgStep1El.style.display = "none";
     tgStep2El.style.display = "none";
   }
 
-  if (s.whatsapp) {
-    waStatusEl.className = "status ok";
-    waStatusEl.textContent = `✅ Connected${s.whatsapp_phone ? " (" + s.whatsapp_phone + ")" : ""}`;
+  // WhatsApp accounts
+  const waAccounts = s.whatsapp_accounts || (s.whatsapp ? [{ phone: s.whatsapp_phone || "connected", session_id: String(s.user_id || "") }] : []);
+  renderPills(waAccountsList, waAccounts, "phone", "whatsapp", "session_id");
+  if (waAccounts.length > 0) {
     waStep1El.style.display = "none";
     waQrContainer.style.display = "none";
   }
@@ -77,7 +104,7 @@ async function getOmniHRCookies() {
 }
 
 async function init() {
-  await refreshStatus();  // show persisted status immediately
+  await refreshStatus();
 
   const { access, refresh } = await getOmniHRCookies();
   if (!access || !refresh) {
@@ -149,10 +176,10 @@ pairBtn.addEventListener("click", async () => {
 googleConnectBtn.addEventListener("click", async () => {
   const code = googleCodeEl.value.trim();
   if (!/^\d{6}$/.test(code)) {
-    googleStatusEl.className = "status err"; googleStatusEl.textContent = "Code must be 6 digits."; return;
+    googleAccountsList.textContent = "Code must be 6 digits."; return;
   }
   googleConnectBtn.disabled = true;
-  googleStatusEl.className = "status warn"; googleStatusEl.textContent = "Opening Google sign-in…";
+  googleConnectBtn.textContent = "Opening Google sign-in…";
 
   const redirectUri = `https://${chrome.runtime.id}.chromiumapp.org/`;
   const scopes = ["https://www.googleapis.com/auth/gmail.readonly",
@@ -169,16 +196,19 @@ googleConnectBtn.addEventListener("click", async () => {
     const responseUrl = await chrome.identity.launchWebAuthFlow({ url: authUrl.toString(), interactive: true });
     const authCode = new URL(responseUrl).searchParams.get("code");
     if (!authCode) throw new Error("No auth code");
-    googleStatusEl.textContent = "Connecting…";
+    googleConnectBtn.textContent = "Connecting…";
     const r = await fetch(`${BACKEND}/extension/google-auth`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pairing_code: code, auth_code: authCode, redirect_uri: redirectUri }),
     });
     if (!r.ok) throw new Error(await r.text());
     googleCodeEl.value = "";
+    googleConnectBtn.textContent = "Add Google Account";
+    googleConnectBtn.disabled = false;
     await refreshStatus();
   } catch (e) {
-    googleStatusEl.className = "status err"; googleStatusEl.textContent = `Failed: ${e.message}`;
+    googleAccountsList.textContent = `Failed: ${e.message}`;
+    googleConnectBtn.textContent = "Add Google Account";
     googleConnectBtn.disabled = false;
   }
 });
@@ -186,20 +216,20 @@ googleConnectBtn.addEventListener("click", async () => {
 // --- Telegram connect ---
 tgInitBtn.addEventListener("click", async () => {
   const code = tgCodeEl.value.trim();
-  if (!/^\d{6}$/.test(code)) { tgStatusEl.className = "status err"; tgStatusEl.textContent = "Code must be 6 digits."; return; }
+  if (!/^\d{6}$/.test(code)) { tgStep1El.querySelector("button").disabled = false; return; }
   tgInitBtn.disabled = true;
-  tgStatusEl.className = "status warn"; tgStatusEl.textContent = "Sending code to Telegram…";
+  tgAccountsList.textContent = "Sending code to Telegram…";
   try {
     const r = await fetch(`${BACKEND}/extension/telegram-init`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pairing_code: code }),
     });
     if (!r.ok) throw new Error(await r.text());
-    tgStatusEl.textContent = "Code sent — check Telegram for the OTP.";
+    tgAccountsList.textContent = "Code sent — check Telegram for the OTP.";
     tgStep1El.style.display = "none";
     tgStep2El.style.display = "block";
   } catch (e) {
-    tgStatusEl.className = "status err"; tgStatusEl.textContent = `Failed: ${e.message}`;
+    tgAccountsList.textContent = `Failed: ${e.message}`;
     tgInitBtn.disabled = false;
   }
 });
@@ -208,16 +238,21 @@ tgVerifyBtn.addEventListener("click", async () => {
   const code = tgCodeEl.value.trim();
   const otp = tgOtpEl.value.trim();
   tgVerifyBtn.disabled = true;
-  tgStatusEl.className = "status warn"; tgStatusEl.textContent = "Verifying…";
+  tgAccountsList.textContent = "Verifying…";
   try {
     const r = await fetch(`${BACKEND}/extension/telegram-verify`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pairing_code: code, code: otp }),
     });
     if (!r.ok) throw new Error(await r.text());
+    tgStep2El.style.display = "none";
+    tgStep1El.style.display = "block";
+    tgCodeEl.value = "";
+    tgOtpEl.value = "";
+    tgInitBtn.disabled = false;
     await refreshStatus();
   } catch (e) {
-    tgStatusEl.className = "status err"; tgStatusEl.textContent = `Failed: ${e.message}`;
+    tgAccountsList.textContent = `Failed: ${e.message}`;
     tgVerifyBtn.disabled = false;
   }
 });
@@ -227,9 +262,9 @@ let waPolling = null;
 
 waInitBtn.addEventListener("click", async () => {
   const code = waCodeEl.value.trim();
-  if (!/^\d{6}$/.test(code)) { waStatusEl.className = "status err"; waStatusEl.textContent = "Code must be 6 digits."; return; }
+  if (!/^\d{6}$/.test(code)) { return; }
   waInitBtn.disabled = true;
-  waStatusEl.className = "status warn"; waStatusEl.textContent = "Connecting to WhatsApp…";
+  waAccountsList.textContent = "Connecting to WhatsApp…";
   try {
     const r = await fetch(`${BACKEND}/extension/whatsapp-init`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -238,10 +273,10 @@ waInitBtn.addEventListener("click", async () => {
     if (!r.ok) throw new Error(await r.text());
     waStep1El.style.display = "none";
     waQrContainer.style.display = "block";
-    waStatusEl.textContent = "Scan the QR code below with WhatsApp.";
+    waAccountsList.textContent = "Scan the QR code below with WhatsApp.";
     startWaQrPoll(code);
   } catch (e) {
-    waStatusEl.className = "status err"; waStatusEl.textContent = `Failed: ${e.message}`;
+    waAccountsList.textContent = `Failed: ${e.message}`;
     waInitBtn.disabled = false;
   }
 });
@@ -255,6 +290,10 @@ function startWaQrPoll(pairingCode) {
       const data = await r.json();
       if (data.connected) {
         clearInterval(waPolling); waPolling = null;
+        waQrContainer.style.display = "none";
+        waStep1El.style.display = "block";
+        waInitBtn.disabled = false;
+        waCodeEl.value = "";
         await refreshStatus(); return;
       }
       if (data.qr) {
