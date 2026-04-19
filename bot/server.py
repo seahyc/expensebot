@@ -61,7 +61,7 @@ from omnihr_client.policies import PolicyEntry, get_policies
 from omnihr_client.schema import invalidate_schema
 
 from . import access, claude_oauth, learning, logging_setup, pages, rate_limit, storage
-from .common.agent import run_agent
+from .common.agent import run_agent, render_merchants_block
 from .common.boss_profile import refresh_boss_profile
 from .plugins.registry import load_enabled_skills, load_enabled_tools
 from .common.agent_parser import parse_receipt_via_agent
@@ -1441,6 +1441,37 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             results = await asyncio.wait_for(context_lookup.gcal_context(dt, user_id=u.get("id")), timeout=5.0)
             return "\n".join(results) if results else "No calendar events found near this time."
 
+        elif tool_name == "get_omnihr_context":
+            tenant_md = load_tenant_md(u.get("tenant_id"))
+            policy_path = REPO_ROOT / "bot" / "skills" / "omnihr" / "policy.md"
+            policy_md = policy_path.read_text() if policy_path.exists() else ""
+            merchants = storage.top_merchants(u["id"], limit=20)
+            merchants_rendered = render_merchants_block(merchants)
+            try:
+                async with client_for(u) as client:
+                    recent = await client.list_submissions(page_size=15)
+                rows = recent.get("results", [])
+                claims_lines = [
+                    f"#{r['id']} {r.get('receipt_date','?')} "
+                    f"{r.get('amount_currency','?')} {r.get('amount','?')} "
+                    f"{r.get('merchant') or '?'} "
+                    f"[{STATUS_LABELS.get(r.get('status', 0), '?')}]"
+                    for r in rows
+                ]
+                claims_md = "\n".join(claims_lines) if claims_lines else "(no recent claims)"
+            except Exception as e:
+                claims_md = f"(couldn't fetch: {e})"
+            parts = [f"## Org config\n{tenant_md[:2000]}"]
+            if policy_md:
+                parts.append(f"## Expense policy\n{policy_md[:3500]}")
+            if merchants_rendered:
+                parts.append(
+                    f"## Merchants you've filed before\n{merchants_rendered}\n"
+                    f"_(confident) = filed same way 3+ times — file without asking._"
+                )
+            parts.append(f"## Recent claims\n{claims_md}")
+            return "\n\n".join(parts)
+
         return f"Unknown tool: {tool_name}"
 
     return execute
@@ -1521,7 +1552,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     progress = await msg.reply_text(voice_for_user(u).text("agent_progress"))
-    tenant_md = load_tenant_md(u.get("tenant_id"))
     user_md = load_user_md(u)
     executor = await _build_tool_executor(u)
     history = storage.get_recent_messages(u["id"], limit=12)
@@ -1531,12 +1561,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             anthropic=anth,
             user_message=text,
             has_file=False,
-            tenant_md=tenant_md,
             user_md=user_md,
             profile_md=storage.get_profile_md(u["id"]),
             boss_profile_md=storage.get_boss_profile_md(u["id"]),
-            merchants=storage.top_merchants(u["id"], limit=20),
-            recent_claims="(agent will fetch via tools if needed)",
             tool_executor=executor,
             conversation_history=history,
             user=u,

@@ -21,14 +21,6 @@ from .tools import TOOLS as _BASE_TOOLS
 from ..plugins.registry import load_enabled_skills, load_enabled_tools
 from ..voice import build_agent_system_prompt
 
-# Load expense policy once at module level — missing file is non-fatal.
-try:
-    _POLICY_MD = (
-        Path(__file__).parent.parent / "skills" / "omnihr" / "policy.md"
-    ).read_text()
-except Exception:
-    _POLICY_MD = ""
-
 # Load plugin skills and tools at startup — all disabled by default.
 _PLUGIN_SKILLS = load_enabled_skills()
 _PLUGIN_TOOLS = load_enabled_tools()
@@ -72,12 +64,9 @@ def render_merchants_block(rows: list[dict]) -> str:
 
 def build_context_text(
     *,
-    tenant_md: str,
     user_md: str,
     profile_md: str,
     boss_profile_md: str = "",
-    merchants: list[dict],
-    recent_claims: str,
     has_file: bool,
     user_message: str,
     triangulation_md: str | None = None,
@@ -93,36 +82,19 @@ def build_context_text(
         if boss_profile_md.strip()
         else ""
     )
-    merchants_rendered = render_merchants_block(merchants)
-    merchants_block = (
-        f"## Merchants you've filed before\n{merchants_rendered}\n"
-        f"_(confident) = you've filed this merchant the same way 3+ times — "
-        f"file without asking._\n\n"
-        if merchants_rendered
-        else ""
-    )
     triangulation_block = (
         f"{triangulation_md}\n\n"
         if triangulation_md
         else ""
     )
-    policy_block = (
-        f"## Expense policy\n{_POLICY_MD[:3500]}\n\n"
-        if _POLICY_MD
-        else ""
-    )
     return (
         f"## Now\n{_now_sgt()}\n\n"
-        f"## Org config\n{tenant_md[:2000]}\n\n"
         f"{boss_block}"
         f"{about_block}"
         f"## Your rules (learned from past corrections)\n"
         f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
-        f"{merchants_block}"
-        f"{policy_block}"
-        f"## Recent claims\n{recent_claims[:1500]}\n\n"
         f"{triangulation_block}"
-        f"{'[User sent a receipt photo/PDF — call parse_receipt]' if has_file else ''}\n"
+        f"{'[User sent a receipt photo/PDF — call parse_receipt first, then get_omnihr_context]' if has_file else ''}\n"
         f"## User message\n{user_message}"
     )
 
@@ -132,12 +104,9 @@ async def run_agent(
     anthropic: AsyncAnthropic,
     user_message: str,
     has_file: bool = False,
-    tenant_md: str = "",
     user_md: str = "",
     profile_md: str = "",
     boss_profile_md: str = "",
-    merchants: list[dict] | None = None,
-    recent_claims: str = "",
     tool_executor,  # async callable(tool_name, tool_input) -> str
     conversation_history: list[dict] | None = None,  # [{direction, body}] oldest first
     user: dict[str, Any] | None = None,
@@ -170,12 +139,9 @@ async def run_agent(
             {
                 "type": "text",
                 "text": build_context_text(
-                    tenant_md=tenant_md,
                     user_md=user_md,
                     profile_md=profile_md,
                     boss_profile_md=boss_profile_md,
-                    merchants=merchants or [],
-                    recent_claims=recent_claims,
                     has_file=has_file,
                     user_message=user_message,
                 ),

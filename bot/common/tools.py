@@ -167,6 +167,20 @@ TOOLS = [
         },
     },
     {
+        "name": "get_omnihr_context",
+        "description": (
+            "Load the OmniHR expense context: org config, expense policy, recent claims, "
+            "and merchant memory. Call this FIRST whenever the user's request involves "
+            "expenses, receipts, claims, policy, or anything OmniHR-related. "
+            "Returns everything you need to classify and file claims correctly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         "name": "update_profile",
         "description": (
             "Rewrite your always-in-context memory of WHO this user is — name, "
