@@ -333,6 +333,51 @@ TOOLS = [
         },
     },
     {
+        "name": "file_from_email",
+        "description": (
+            "Find a receipt email in Gmail, download its attachment, and file it as an OmniHR draft. "
+            "Use when the user wants to file an expense from an email receipt (e.g. Ryde, Grab, airline). "
+            "Call get_omnihr_context FIRST. Then call this with the merchant/sender name and date. "
+            "This downloads the PDF/image attachment from the email and goes through the full parse flow."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Gmail search query to find the receipt, e.g. 'from:ryde receipt' or 'Grab receipt Apr 18'",
+                },
+                "merchant": {"type": "string", "description": "Merchant name hint for parsing, e.g. 'Ryde'"},
+                "policy_id": {"type": "integer", "description": "OmniHR policy ID from get_omnihr_context"},
+                "description": {"type": "string", "description": "Optional description/purpose for the expense"},
+            },
+            "required": ["query", "merchant", "policy_id"],
+        },
+    },
+    {
+        "name": "file_expense",
+        "description": (
+            "Create an OmniHR expense draft from structured data — no receipt image needed. "
+            "Use when you already know the merchant, amount, date, and currency from an email, "
+            "WhatsApp message, or the user telling you directly. "
+            "Call get_omnihr_context FIRST so you know the right policy to use. "
+            "The draft will be created without an attached receipt; the user can add one later."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "merchant": {"type": "string", "description": "Merchant name, e.g. 'Ryde'"},
+                "amount": {"type": "number", "description": "Amount as a number, e.g. 15.25"},
+                "currency": {"type": "string", "description": "ISO currency code, e.g. 'SGD'"},
+                "date": {"type": "string", "description": "Receipt date in YYYY-MM-DD format"},
+                "description": {"type": "string", "description": "Brief description, e.g. 'Ryde to client meeting'"},
+                "policy_id": {"type": "integer", "description": "OmniHR policy ID from get_omnihr_context"},
+                "sub_category": {"type": "string", "description": "Sub-category label if the policy requires it, e.g. 'Taxi/Grab'"},
+            },
+            "required": ["merchant", "amount", "currency", "date", "policy_id"],
+        },
+    },
+    {
         "name": "update_profile",
         "description": (
             "Rewrite your always-in-context memory of WHO this user is — name, "

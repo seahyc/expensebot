@@ -97,6 +97,55 @@ async def _get_valid_access_token(user_id: int) -> str | None:
     return access if not needs_refresh else None
 
 
+async def _get_all_valid_access_tokens(user_id: int) -> list[tuple[str, str]]:
+    """Return live (email, access_token) for all connected Google accounts."""
+    from .. import storage
+    accounts = storage.get_google_accounts(user_id)
+    if not accounts:
+        return []
+
+    now = datetime.now(timezone.utc)
+    results: list[tuple[str, str]] = []
+
+    async with httpx.AsyncClient() as client:
+        for acct in accounts:
+            email = acct["email"] or ""
+            access = acct["access_token"]
+            refresh = acct["refresh_token"]
+            expiry = acct["expiry"]
+
+            needs_refresh = not access or expiry is None or expiry <= now + timedelta(minutes=2)
+
+            if needs_refresh and refresh:
+                try:
+                    r = await client.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "client_id": _GOOGLE_CLIENT_ID,
+                            "client_secret": _GOOGLE_CLIENT_SECRET,
+                            "refresh_token": refresh,
+                            "grant_type": "refresh_token",
+                        },
+                        timeout=_API_TIMEOUT,
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        access = data["access_token"]
+                        new_expiry = now + timedelta(seconds=data.get("expires_in", 3600))
+                        storage.update_google_account_token(user_id, email, access, new_expiry)
+                    else:
+                        log.warning("Token refresh failed for %s: %s", email, r.status_code)
+                        access = None
+                except Exception as e:
+                    log.warning("Token refresh error for %s: %s", email, e)
+                    access = None
+
+            if access:
+                results.append((email, access))
+
+    return results
+
+
 def _fmt_dt(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -113,12 +162,12 @@ async def gmail_context(
     user_id: int | None = None,
     window_days: int = 3,
 ) -> list[str]:
-    """Search Gmail for threads. If merchant is empty, returns recent emails from the last week."""
+    """Search Gmail across all connected Google accounts."""
     if user_id is None:
         return []
 
-    access_token = await _get_valid_access_token(user_id)
-    if not access_token:
+    tokens = await _get_all_valid_access_tokens(user_id)
+    if not tokens:
         return []
 
     if merchant:
@@ -131,34 +180,112 @@ async def gmail_context(
         )
         max_results = 5
     else:
-        # Broad recent search: last 7 days, no keyword filter
-        after = dt - timedelta(days=7)
+        after = dt - timedelta(days=window_days if window_days > 3 else 7)
         query = f"after:{_fmt_date_for_gmail(after)}"
         max_results = 10
 
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                "https://gmail.googleapis.com/gmail/v1/users/me/threads",
-                params={"q": query, "maxResults": max_results},
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=_API_TIMEOUT,
-            )
-        if r.status_code != 200:
-            log.warning("Gmail API error: %s", r.status_code)
-            return []
+    seen: set[str] = set()
+    results: list[str] = []
 
-        data = r.json()
-        threads = data.get("threads", [])
-        results: list[str] = []
-        for t in threads[:max_results]:
-            snippet = t.get("snippet", "")
-            if snippet:
-                results.append(snippet[:120])
-        return results
-    except Exception as e:
-        log.warning("gmail_context error: %s", e)
-        return []
+    async with httpx.AsyncClient() as client:
+        for email, access_token in tokens:
+            try:
+                r = await client.get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/threads",
+                    params={"q": query, "maxResults": max_results},
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=_API_TIMEOUT,
+                )
+                if r.status_code != 200:
+                    log.warning("Gmail API error for %s: %s", email, r.status_code)
+                    continue
+                for t in r.json().get("threads", []):
+                    tid = t.get("id", "")
+                    snippet = t.get("snippet", "")[:120]
+                    if tid and tid not in seen and snippet:
+                        seen.add(tid)
+                        results.append(snippet)
+            except Exception as e:
+                log.warning("gmail_context error for %s: %s", email, e)
+
+    return results[:max_results * len(tokens)]
+
+
+async def fetch_gmail_attachment(
+    query: str,
+    user_id: int,
+    preferred_types: tuple[str, ...] = ("application/pdf", "image/"),
+) -> tuple[bytes, str, str] | None:
+    """Search Gmail for `query`, return the first attachment as (bytes, filename, mime_type).
+
+    Tries messages matching `query`, walks their MIME parts for a file attachment
+    whose mime type starts with one of `preferred_types`. Returns None if nothing found.
+    """
+    import base64
+
+    tokens = await _get_all_valid_access_tokens(user_id)
+    if not tokens:
+        return None
+
+    async with httpx.AsyncClient() as client:
+        for _email, access_token in tokens:
+            headers = {"Authorization": f"Bearer {access_token}"}
+            try:
+                # 1. Find messages
+                r = await client.get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                    params={"q": query, "maxResults": 10},
+                    headers=headers,
+                    timeout=8.0,
+                )
+                if r.status_code != 200:
+                    continue
+                messages = r.json().get("messages", [])
+                if not messages:
+                    continue
+
+                # 2. Walk each message for an attachment
+                for msg_ref in messages:
+                    msg_id = msg_ref["id"]
+                    mr = await client.get(
+                        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                        params={"format": "full"},
+                        headers=headers,
+                        timeout=8.0,
+                    )
+                    if mr.status_code != 200:
+                        continue
+                    msg = mr.json()
+
+                    # Flatten all MIME parts
+                    def _parts(payload: dict) -> list[dict]:
+                        parts = []
+                        if payload.get("body", {}).get("attachmentId"):
+                            parts.append(payload)
+                        for p in payload.get("parts", []):
+                            parts.extend(_parts(p))
+                        return parts
+
+                    for part in _parts(msg.get("payload", {})):
+                        mime = part.get("mimeType", "")
+                        if not any(mime.startswith(t) for t in preferred_types):
+                            continue
+                        attach_id = part["body"]["attachmentId"]
+                        filename = part.get("filename") or "receipt"
+                        ar = await client.get(
+                            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/attachments/{attach_id}",
+                            headers=headers,
+                            timeout=10.0,
+                        )
+                        if ar.status_code != 200:
+                            continue
+                        raw = ar.json().get("data", "")
+                        file_bytes = base64.urlsafe_b64decode(raw + "==")
+                        return file_bytes, filename, mime
+            except Exception as e:
+                log.warning("fetch_gmail_attachment error for %s: %s", _email, e)
+
+    return None
 
 
 async def gcal_context(
@@ -167,18 +294,17 @@ async def gcal_context(
     window_hours: float = 2.0,
     broad: bool = False,
 ) -> list[str]:
-    """Fetch Google Calendar events. If broad=True (no specific time), fetches next 7 days."""
+    """Fetch Google Calendar events across all connected Google accounts."""
     if user_id is None:
         return []
 
-    access_token = await _get_valid_access_token(user_id)
-    if not access_token:
+    tokens = await _get_all_valid_access_tokens(user_id)
+    if not tokens:
         return []
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     if broad:
-        # For general "what's upcoming?" queries: start of today → +window_hours (treated as days*24)
         days = max(1, int(window_hours / 24)) if window_hours > 24 else 7
         time_min = _fmt_dt(dt.replace(hour=0, minute=0, second=0, microsecond=0))
         time_max = _fmt_dt(dt + timedelta(days=days))
@@ -186,45 +312,44 @@ async def gcal_context(
         time_min = _fmt_dt(dt - timedelta(hours=window_hours))
         time_max = _fmt_dt(dt + timedelta(hours=window_hours))
 
-    try:
-        max_results = 20 if broad else 5
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-                params={
-                    "timeMin": time_min,
-                    "timeMax": time_max,
-                    "maxResults": max_results,
-                    "orderBy": "startTime",
-                    "singleEvents": "true",
-                },
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=_API_TIMEOUT,
-            )
-        if r.status_code != 200:
-            log.warning("Calendar API error: %s", r.status_code)
-            return []
+    max_results = 20 if broad else 5
+    results: list[str] = []
 
-        data = r.json()
-        events = data.get("items", [])
-        results: list[str] = []
-        for ev in events[:max_results]:
-            summary = ev.get("summary") or "(no title)"
-            start = ev.get("start", {})
-            start_time = start.get("dateTime") or start.get("date") or ""
-            if start_time:
-                try:
-                    parsed_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-                    start_time = parsed_start.strftime("%H:%M")
-                except Exception:
-                    start_time = start_time[:10]
-                results.append(f"{summary} at {start_time}")
-            else:
-                results.append(summary)
-        return results
-    except Exception as e:
-        log.warning("gcal_context error: %s", e)
-        return []
+    async with httpx.AsyncClient() as client:
+        for email, access_token in tokens:
+            try:
+                r = await client.get(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    params={
+                        "timeMin": time_min,
+                        "timeMax": time_max,
+                        "maxResults": max_results,
+                        "orderBy": "startTime",
+                        "singleEvents": "true",
+                    },
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=_API_TIMEOUT,
+                )
+                if r.status_code != 200:
+                    log.warning("Calendar API error for %s: %s", email, r.status_code)
+                    continue
+                for ev in r.json().get("items", []):
+                    summary = ev.get("summary") or "(no title)"
+                    start = ev.get("start", {})
+                    start_time = start.get("dateTime") or start.get("date") or ""
+                    if start_time:
+                        try:
+                            parsed_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                            start_time = parsed_start.strftime("%H:%M")
+                        except Exception:
+                            start_time = start_time[:10]
+                        results.append(f"{summary} at {start_time}")
+                    else:
+                        results.append(summary)
+            except Exception as e:
+                log.warning("gcal_context error for %s: %s", email, e)
+
+    return results
 
 
 def _infer_purpose(

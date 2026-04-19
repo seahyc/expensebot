@@ -1293,7 +1293,7 @@ async def _record_merchant_after_submit(client, u: dict, submission_id: int) -> 
             log.exception("record_merchant_choice failed for user=%s", u["id"])
 
 
-async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_type: str = "", filename: str = ""):
+async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_type: str = "", filename: str = "", *, bot=None, chat_id: int | None = None):
     """Build a tool executor closure for the agent, bound to this user + file."""
 
     async def execute(tool_name: str, tool_input: dict) -> str:
@@ -1654,6 +1654,102 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             parts.append(f"## Recent claims\n{claims_md}")
             return "\n\n".join(parts)
 
+        elif tool_name == "file_from_email":
+            from .common.context_lookup import fetch_gmail_attachment
+
+            query = tool_input.get("query", "")
+            merchant_hint = tool_input.get("merchant", "")
+            description_hint = tool_input.get("description", "")
+
+            if not query:
+                return "file_from_email requires: query"
+
+            if not bot or not chat_id:
+                return "file_from_email requires an active Telegram chat — not available in this context."
+
+            # Download the attachment from Gmail
+            attach = await fetch_gmail_attachment(query, user_id=u["id"])
+            if not attach:
+                return (
+                    f"No attachment found in Gmail for query: '{query}'. "
+                    "Try a different search (e.g. 'from:ryde') or forward the email to me."
+                )
+            att_bytes, att_filename, att_mime = attach
+
+            # Inject into the normal parse+confirm flow — same UX as user sending the photo
+            import io
+            buf = io.BytesIO(att_bytes)
+            buf.name = att_filename
+            asyncio.create_task(
+                _process_receipt_file(
+                    bot=bot,
+                    chat_id=chat_id,
+                    u=u,
+                    file_bytes=att_bytes,
+                    media_type=att_mime,
+                    filename=att_filename,
+                    tg_file_id="",
+                    tg_file_type="document",
+                    user_note=description_hint or merchant_hint,
+                    send_preview=True,
+                )
+            )
+            return f"Fetched '{att_filename}' from your Gmail — sending it now for review. Use the buttons to file or skip."
+
+        elif tool_name == "file_expense":
+            from datetime import date as _date
+            merchant = tool_input.get("merchant", "")
+            amount = tool_input.get("amount")
+            currency = tool_input.get("currency", "SGD")
+            date_str = tool_input.get("date", "")
+            description = tool_input.get("description", merchant)
+            policy_id = int(tool_input.get("policy_id", 0))
+            sub_category = tool_input.get("sub_category", "")
+
+            if not merchant or not amount or not date_str or not policy_id:
+                return "file_expense requires: merchant, amount, date (YYYY-MM-DD), policy_id"
+
+            try:
+                receipt_date = _date.fromisoformat(date_str)
+            except ValueError:
+                return f"Invalid date format: {date_str} — use YYYY-MM-DD"
+
+            try:
+                async with client_for(u) as client:
+                    schema = await client.schema(policy_id, receipt_date)
+                    values: dict[str, Any] = {
+                        "AMOUNT": {"amount": str(amount), "amount_currency": currency},
+                        "MERCHANT": merchant,
+                        "RECEIPT_DATE": receipt_date.isoformat(),
+                        "DESCRIPTION": description,
+                    }
+                    if sub_category:
+                        for f in schema.custom_fields():
+                            if f.field_type == "SINGLE_SELECT" and "sub" in f.label.lower():
+                                values[f.label] = sub_category
+                                break
+                    for f in schema.custom_fields():
+                        label_low = f.label.lower()
+                        if f.is_mandatory and f.label not in values:
+                            if "trip start" in label_low or "trip end" in label_low:
+                                values[f.label] = receipt_date.isoformat()
+                            elif "destination" in label_low:
+                                values[f.label] = "Singapore"
+                    draft = await client.create_draft(
+                        policy_id=policy_id,
+                        schema=schema,
+                        values=values,
+                        receipts=[],
+                    )
+                draft_id = draft.get("id") or draft.get("submission_id")
+                return (
+                    f"Draft filed ✅ #{draft_id}\n"
+                    f"{currency} {amount} · {merchant} · {receipt_date}\n"
+                    f"No receipt attached — add one on OmniHR if required."
+                )
+            except Exception as e:
+                return f"file_expense failed: {e}"
+
         return f"Unknown tool: {tool_name}"
 
     return execute
@@ -1748,7 +1844,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     user_md = load_user_md(u)
-    executor = await _build_tool_executor(u)
+    executor = await _build_tool_executor(u, bot=ctx.bot, chat_id=msg.chat_id)
     history = storage.get_recent_messages(u["id"], limit=12)
 
     _stop_typing = asyncio.Event()
@@ -1802,6 +1898,161 @@ async def on_contact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
+
+
+async def _process_receipt_file(
+    *,
+    bot,
+    chat_id: int,
+    u: dict,
+    file_bytes: bytes,
+    media_type: str,
+    filename: str,
+    tg_file_id: str = "",
+    tg_file_type: str = "document",
+    user_note: str = "",
+    send_preview: bool = False,
+) -> None:
+    """Parse a receipt file and send the parse+confirm message to `chat_id`.
+
+    `send_preview=True` first sends the file as a Telegram message (for email-fetched receipts
+    where the user hasn't seen the attachment yet). For user-uploaded files, skip since they
+    already see what they sent.
+    """
+    import hashlib
+    import io
+
+    sha = hashlib.sha256(file_bytes).hexdigest()
+    cached = storage.find_receipt_by_sha(u["id"], sha)
+
+    if send_preview:
+        try:
+            buf = io.BytesIO(file_bytes)
+            buf.name = filename
+            if media_type.startswith("image/"):
+                await bot.send_photo(chat_id=chat_id, photo=buf, caption=f"📎 {filename}")
+            else:
+                await bot.send_document(chat_id=chat_id, document=buf, filename=filename, caption=f"📎 {filename}")
+        except Exception as e:
+            log.warning("_process_receipt_file: preview send failed: %s", e)
+
+    progress = await bot.send_message(chat_id=chat_id, text="Leave it with me… 👀")
+    log.info("_process_receipt_file: user=%s media=%s size=%d", u["id"], media_type, len(file_bytes))
+
+    if cached and cached.get("omnihr_submission_id"):
+        await progress.edit_text(
+            f"⚠️ Same file as #{cached['omnihr_submission_id']} (filed {cached['created_at']}).\n"
+            f"Reply DELETE {cached['omnihr_submission_id']} or send a different receipt."
+        )
+        return
+
+    tenant_md = load_tenant_md(u.get("tenant_id"))
+    user_md = load_user_md(u)
+
+    async with client_for(u) as client:
+        try:
+            recent = await asyncio.wait_for(client.list_submissions(page_size=10), timeout=5.0)
+            recent_summary = "\n".join(
+                f"- {r.get('receipt_date','?')} {r.get('amount_currency','?')} {r.get('amount','?')} "
+                f"({r.get('policy', {}).get('name','?')})"
+                for r in recent.get("results", [])[:10]
+            ) or "(no recent claims)"
+        except (Exception, asyncio.TimeoutError):
+            recent_summary = "(couldn't fetch recent claims)"
+
+        try:
+            policies: list[PolicyEntry] = await asyncio.wait_for(
+                get_policies(client, u.get("tenant_id") or ""), timeout=5.0
+            )
+        except (Exception, asyncio.TimeoutError) as _pe:
+            log.warning("_process_receipt_file: policies fetch failed: %s", _pe)
+            policies = []
+
+    # Parse
+    parsed = None
+    active_trip = f"User hint: {user_note}" if user_note else None
+    try:
+        agent_raw = await asyncio.wait_for(
+            parse_receipt_via_agent(
+                file_bytes=file_bytes,
+                media_type=media_type,
+                filename=filename,
+                tenant_md=tenant_md,
+                user_md=user_md,
+                recent_claims_summary=recent_summary,
+                active_trip=active_trip,
+            ),
+            timeout=30.0,
+        )
+        if agent_raw and agent_raw.get("is_receipt"):
+            from .common.parser import _to_parsed_receipt
+            parsed = _to_parsed_receipt(agent_raw)
+    except (Exception, asyncio.TimeoutError) as e:
+        log.info("_process_receipt_file: Agent SDK parse skipped: %s", e)
+
+    if parsed is None:
+        try:
+            parsed = await parse_receipt(
+                anthropic=await anthropic_for(u),
+                file_bytes=file_bytes,
+                media_type=media_type,
+                filename=filename,
+                tenant_md=tenant_md,
+                policies=policies,
+            )
+        except Exception as e:
+            await progress.edit_text(f"Parse failed: {e}")
+            return
+
+    if not parsed or not parsed.is_receipt:
+        await progress.edit_text("That doesn't look like a receipt — anything else?")
+        return
+
+    # Dupe check
+    dupes = match_dupes(u["id"], parsed)
+    dupe_warning = format_dupe_warning(dupes) if dupes else None
+
+    # Triangulation
+    triangulation_md: str | None = None
+    if parsed.merchant and parsed.receipt_date:
+        try:
+            SGT = timezone(timedelta(hours=8))
+            from datetime import time as _time
+            receipt_dt = datetime.combine(parsed.receipt_date, _time(12, 0), tzinfo=SGT)
+            tri_result = await asyncio.wait_for(
+                triangulate(
+                    merchant=parsed.merchant,
+                    dt=receipt_dt,
+                    receipt_type=_infer_receipt_type(parsed),
+                    user_id=u.get("id"),
+                ),
+                timeout=2.0,
+            )
+            triangulation_md = tri_result.as_markdown()
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+    _pending_files[chat_id] = _PendingFile(
+        tg_user_id=str(u["id"]),
+        u=u,
+        file_bytes=file_bytes,
+        media_type=media_type,
+        filename=filename,
+        sha=sha,
+        tg_file_id=tg_file_id,
+        tg_file_type=tg_file_type,
+        parsed=parsed,
+        policies=policies,
+        user_note=user_note,
+        triangulation_md=triangulation_md,
+    )
+    confirm_text, confirm_kb = _build_confirm_message(
+        parsed, policies, sha=sha, triangulation_md=triangulation_md
+    )
+    if dupe_warning:
+        confirm_text = f"{dupe_warning}\n\n{confirm_text}"
+    storage.log_message(u["id"], "out", confirm_text)
+    await progress.edit_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
 
 
 async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1911,143 +2162,18 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not await _check_rate(update, u["id"], "parse"):
         return
-    progress = await msg.reply_text("Leave it with me… 👀")
-    log.info("on_photo: processing receipt user=%s media=%s size=%d", u["id"], media_type, len(file_bytes))
 
-    import hashlib
-    sha = hashlib.sha256(file_bytes).hexdigest()
-    cached = storage.find_receipt_by_sha(u["id"], sha)
-    if cached and cached.get("omnihr_submission_id"):
-        await progress.edit_text(
-            f"⚠️ Same file as #{cached['omnihr_submission_id']} (filed {cached['created_at']}).\n"
-            f"Reply DELETE {cached['omnihr_submission_id']} or send a different receipt."
-        )
-        return
-
-    # Build context
-    tenant_md = load_tenant_md(u.get("tenant_id"))
-    user_md = load_user_md(u)
-
-    # Quick recent-claims summary from OmniHR — 5s cap, non-critical context
-    log.info("on_photo: fetching omnihr context user=%s", u["id"])
-    async with client_for(u) as client:
-        try:
-            recent = await asyncio.wait_for(client.list_submissions(page_size=10), timeout=5.0)
-            recent_summary = "\n".join(
-                f"- {r.get('receipt_date','?')} {r.get('amount_currency','?')} {r.get('amount','?')} "
-                f"({r.get('policy', {}).get('name','?')})"
-                for r in recent.get("results", [])[:10]
-            ) or "(no recent claims)"
-        except (Exception, asyncio.TimeoutError):
-            recent_summary = "(couldn't fetch recent claims)"
-
-        try:
-            policies: list[PolicyEntry] = await asyncio.wait_for(
-                get_policies(client, u.get("tenant_id") or ""), timeout=5.0
-            )
-        except (Exception, asyncio.TimeoutError) as _pe:
-            log.warning("policies fetch failed: %s", _pe)
-            policies = []
-
-    log.info("on_photo: omnihr context done, starting parse user=%s", u["id"])
-
-    # Parse — try Agent SDK first (subscription auth), fall back to direct API
-    parsed = None
-    agent_raw = None
-    active_trip = f"User hint: {user_note}" if user_note else None
-    try:
-        agent_raw = await asyncio.wait_for(
-            parse_receipt_via_agent(
-                file_bytes=file_bytes,
-                media_type=media_type,
-                filename=filename,
-                tenant_md=tenant_md,
-                user_md=user_md,
-                recent_claims_summary=recent_summary,
-                active_trip=active_trip,
-            ),
-            timeout=30.0,
-        )
-    except (Exception, asyncio.TimeoutError) as e:
-        log.info("Agent SDK parse skipped: %s", e)
-
-    if agent_raw and agent_raw.get("is_receipt"):
-        # Convert agent_raw dict to ParsedReceipt
-        from .common.parser import _to_parsed_receipt
-        parsed = _to_parsed_receipt(agent_raw)
-    else:
-        # Fallback to direct Anthropic API
-        try:
-            parsed = await parse_receipt(
-                anthropic=await anthropic_for(u),
-                file_bytes=file_bytes,
-                media_type=media_type,
-                tenant_md=tenant_md,
-                user_md=user_md,
-                recent_claims_summary=recent_summary,
-                active_trip=active_trip,
-                policies=policies,
-            )
-        except RuntimeError as e:
-            if "No Anthropic key" in str(e):
-                await progress.edit_text(
-                    "No API key and Agent SDK unavailable.\n"
-                    "Either: /login (use Claude subscription) or /setkey sk-ant-…"
-                )
-                return
-            raise
-        except Exception as e:
-            await progress.edit_text(f"Parse failed: {e}")
-            return
-
-    if not parsed.is_receipt:
-        await progress.edit_text("That doesn't look like a receipt — anything else?")
-        return
-
-    # Run triangulation (Gmail + Calendar) in parallel with a 2-second budget.
-    # This is best-effort — never block filing on it.
-    triangulation_md: str | None = None
-    if parsed.merchant and parsed.receipt_date:
-        try:
-            SGT = timezone(timedelta(hours=8))
-            from datetime import time as _time
-            receipt_dt = datetime.combine(parsed.receipt_date, _time(12, 0), tzinfo=SGT)
-            tri_result = await asyncio.wait_for(
-                triangulate(
-                    merchant=parsed.merchant,
-                    dt=receipt_dt,
-                    receipt_type=_infer_receipt_type(parsed),
-                    user_id=u.get("id"),
-                ),
-                timeout=2.0,
-            )
-            triangulation_md = tri_result.as_markdown()
-        except asyncio.TimeoutError:
-            log.debug("triangulation timed out — proceeding without context")
-        except Exception as e:
-            log.warning("triangulation failed: %s", e)
-
-    # Store pending state and show confirmation / policy picker
-    chat_id = msg.chat_id
-    _pending_files[chat_id] = _PendingFile(
-        tg_user_id=str(msg.from_user.id),
+    await _process_receipt_file(
+        bot=ctx.bot,
+        chat_id=msg.chat_id,
         u=u,
         file_bytes=file_bytes,
         media_type=media_type,
         filename=filename,
-        sha=sha,
         tg_file_id=tg_file_id,
         tg_file_type=tg_file_type,
-        parsed=parsed,
-        policies=policies,
         user_note=user_note,
-        triangulation_md=triangulation_md,
     )
-    confirm_text, confirm_kb = _build_confirm_message(
-        parsed, policies, sha=sha, triangulation_md=triangulation_md
-    )
-    storage.log_message(u["id"], "out", confirm_text)
-    await progress.edit_text(confirm_text, parse_mode="Markdown", reply_markup=confirm_kb)
 
 
 # ---------------------------------------------------------------------------
