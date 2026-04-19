@@ -570,14 +570,22 @@ async def cmd_connect_telegram(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         return
     code = f"{secrets.randbelow(1_000_000):06d}"
     storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
+    from telegram import KeyboardButton, ReplyKeyboardMarkup
+    keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Share my number", request_contact=True)]],
+        one_time_keyboard=True,
+        resize_keyboard=True,
+    )
     await update.message.reply_text(
         f"```\n{code}\n```\n"
         f"👆 Tap to copy.\n\n"
-        f"Open the [Janai extension]({PUBLIC_BASE_URL}/extension) → Connections tab → paste this code → enter your phone number.\n\n"
-        f"Don't have it? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds.\n\n"
+        f"*Step 1:* Tap *Share my number* below so I know which account to read.\n"
+        f"*Step 2:* Open the [Janai extension]({PUBLIC_BASE_URL}/extension) → paste the code above → tap *Connect Telegram*.\n\n"
+        f"Don't have the extension? [Install here]({PUBLIC_BASE_URL}/extension) — 30 seconds.\n\n"
         f"_(Code valid for 5 minutes.)_",
         parse_mode="Markdown",
         disable_web_page_preview=True,
+        reply_markup=keyboard,
     )
 
 
@@ -1549,6 +1557,26 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await progress.edit_text(reply)  # fallback without markdown
 
 
+async def on_contact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """User shared their phone number via the request_contact keyboard."""
+    from telegram import ReplyKeyboardRemove
+    contact = update.message.contact
+    if not contact or contact.user_id != update.effective_user.id:
+        return  # shared someone else's contact, ignore
+    phone = contact.phone_number
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    # Store phone so /extension/telegram-init can use it without the user typing it
+    with storage.db() as conn:
+        conn.execute("UPDATE users SET telegram_phone=? WHERE id=?", (phone, user_db_id))
+    await update.message.reply_text(
+        f"✅ Got it — {phone}.\n\nNow open the Janai extension, paste the code, and tap *Connect Telegram*.",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
 async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Photo or document → agent with parse_receipt tool."""
     if not await _gate(update):
@@ -2306,11 +2334,8 @@ async function submitKey(){{
             raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
 
         pairing_code = p.get("pairing_code", "")
-        phone = p.get("phone", "")
         if not re.fullmatch(r"\d{6}", pairing_code):
             raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
-        if not phone:
-            raise HTTPException(status_code=400, detail="phone required")
 
         # Peek at pairing code without consuming — we need it again for verify
         with storage.db() as conn:
@@ -2321,6 +2346,12 @@ async function submitKey(){{
         if not row:
             raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
         user_db_id = row["user_id"]
+
+        # Phone comes from the contact share in-bot, or falls back to extension-supplied
+        user = storage.get_user(user_db_id)
+        phone = (user or {}).get("telegram_phone") or p.get("phone", "")
+        if not phone:
+            raise HTTPException(status_code=400, detail="Share your phone number in the bot first (tap the 'Share my number' button)")
 
         _tg_phones[user_db_id] = phone
 
@@ -2577,6 +2608,7 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("connect_google", cmd_connect_google))
     tg_app.add_handler(CommandHandler("connect_telegram", cmd_connect_telegram))
     tg_app.add_handler(CommandHandler("connect_whatsapp", cmd_connect_whatsapp))
+    tg_app.add_handler(MessageHandler(filters.CONTACT, on_contact))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

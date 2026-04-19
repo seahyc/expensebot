@@ -16,7 +16,6 @@ const tgStatusEl = document.getElementById("tg-status");
 const tgStep1El = document.getElementById("tg-step1");
 const tgStep2El = document.getElementById("tg-step2");
 const tgCodeEl = document.getElementById("tg-code");
-const tgPhoneEl = document.getElementById("tg-phone");
 const tgInitBtn = document.getElementById("tg-init");
 const tgOtpEl = document.getElementById("tg-otp");
 const tgVerifyBtn = document.getElementById("tg-verify");
@@ -187,15 +186,13 @@ googleConnectBtn.addEventListener("click", async () => {
 // --- Telegram connect ---
 tgInitBtn.addEventListener("click", async () => {
   const code = tgCodeEl.value.trim();
-  const phone = tgPhoneEl.value.trim();
   if (!/^\d{6}$/.test(code)) { tgStatusEl.className = "status err"; tgStatusEl.textContent = "Code must be 6 digits."; return; }
-  if (!phone) { tgStatusEl.className = "status err"; tgStatusEl.textContent = "Enter your phone number."; return; }
   tgInitBtn.disabled = true;
   tgStatusEl.className = "status warn"; tgStatusEl.textContent = "Sending code to Telegram…";
   try {
     const r = await fetch(`${BACKEND}/extension/telegram-init`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pairing_code: code, phone }),
+      body: JSON.stringify({ pairing_code: code }),
     });
     if (!r.ok) throw new Error(await r.text());
     tgStatusEl.textContent = "Code sent — check Telegram for the OTP.";
