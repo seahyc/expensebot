@@ -43,12 +43,25 @@ db.exec(`
     created_at INTEGER DEFAULT (unixepoch())
   );
   CREATE INDEX IF NOT EXISTS idx_session_ts ON messages(session_id, timestamp);
+  CREATE TABLE IF NOT EXISTS known_jids (
+    session_id TEXT NOT NULL,
+    jid TEXT NOT NULL,
+    PRIMARY KEY (session_id, jid)
+  );
 `);
 
 // Prepared statements
 const insertMsg = db.prepare(`
   INSERT INTO messages (session_id, chat_jid, sender_jid, timestamp, text)
   VALUES (?, ?, ?, ?, ?)
+`);
+
+const upsertJid = db.prepare(`
+  INSERT OR IGNORE INTO known_jids (session_id, jid) VALUES (?, ?)
+`);
+
+const getKnownJids = db.prepare(`
+  SELECT jid FROM known_jids WHERE session_id = ?
 `);
 
 const queryMsgs = db.prepare(`
@@ -190,6 +203,16 @@ async function startSession(sessionId) {
         state.phone = null;
       }
       log.info({ sessionId, phone: state.phone }, "WA session connected");
+      // Backfill from persisted JIDs (works on reconnect)
+      setTimeout(() => {
+        const jids = getKnownJids.all(sessionId).map((r) => r.jid);
+        if (jids.length > 0) {
+          log.info({ sessionId, count: jids.length }, "backfilling from persisted JIDs");
+          syncChatsHistory(sessionId, jids).catch((e) =>
+            log.warn({ sessionId, err: e.message }, "syncChatsHistory error")
+          );
+        }
+      }, 5000);
     }
 
     if (connection === "close") {
@@ -271,14 +294,20 @@ async function startSession(sessionId) {
 
   sock.ev.on("contacts.upsert", (contacts) => {
     for (const c of contacts) {
-      if (c.id && !c.id.endsWith("@broadcast")) state.knownJids.add(c.id);
+      if (c.id && !c.id.endsWith("@broadcast") && !isJidBroadcast(c.id)) {
+        state.knownJids.add(c.id);
+        try { upsertJid.run(sessionId, c.id); } catch (_) {}
+      }
     }
     scheduleBackfill();
   });
 
   sock.ev.on("chats.upsert", (chats) => {
     for (const c of chats) {
-      if (c.id && !c.id.endsWith("@broadcast")) state.knownJids.add(c.id);
+      if (c.id && !c.id.endsWith("@broadcast") && !isJidBroadcast(c.id)) {
+        state.knownJids.add(c.id);
+        try { upsertJid.run(sessionId, c.id); } catch (_) {}
+      }
     }
     scheduleBackfill();
   });
