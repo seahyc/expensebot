@@ -3,7 +3,7 @@
   "name": "Janai",
   "version": "0.0.1",
   "description": "Bridges your OmniHR session to Janai — your expense-claim secretary on Telegram/Lark.",
-  "permissions": ["cookies", "storage", "activeTab"],
+  "permissions": ["cookies", "storage", "activeTab", "identity"],
   "host_permissions": [
     "https://*.omnihr.co/*",
     "https://api.omnihr.co/*",

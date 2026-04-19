@@ -3,36 +3,36 @@
 Runs parallel lookups after parsing a receipt to infer business purpose
 from calendar events and email threads near the receipt's transaction time.
 
-Uses the `gw` CLI (google-workspace) via subprocess with a hard 2-second
-timeout so it never blocks the filing flow.
+Uses the Google REST APIs directly with per-user OAuth tokens stored in the DB.
+Falls back gracefully (empty results) when a user hasn't connected their Google
+account yet.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import shutil
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+import httpx
+
+_GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+_GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+
 log = logging.getLogger(__name__)
 
-# Path to gw binary — resolved once at import time.
-_GW_PATH: str | None = shutil.which("gw")
-
-_SUBPROCESS_TIMEOUT = 2.0  # seconds
+_API_TIMEOUT = 4.0  # seconds per Google API call
 
 
 @dataclass
 class TriangulationResult:
-    calendar_events: list[str] = field(default_factory=list)  # event summaries near receipt time
-    email_threads: list[str] = field(default_factory=list)    # email subject lines + snippets
-    inferred_purpose: str | None = None                        # best guess from context
-    confidence: float = 0.0                                    # 0-1
+    calendar_events: list[str] = field(default_factory=list)
+    email_threads: list[str] = field(default_factory=list)
+    inferred_purpose: str | None = None
+    confidence: float = 0.0
 
     def as_markdown(self) -> str | None:
-        """Return formatted markdown block, or None if nothing was found."""
         if not self.calendar_events and not self.email_threads:
             return None
         lines = ["## What I found in your email & calendar", ""]
@@ -51,61 +51,76 @@ class TriangulationResult:
         return "\n".join(lines)
 
 
-async def _run_gw(*args: str, timeout: float = _SUBPROCESS_TIMEOUT) -> str:
-    """Run `gw <args>` as a subprocess. Returns stdout or empty string on any error."""
-    if not _GW_PATH:
-        log.warning("gw binary not found — skipping context lookup")
-        return ""
-    try:
-        proc = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                _GW_PATH,
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            ),
-            timeout=timeout,
-        )
+async def _get_valid_access_token(user_id: int) -> str | None:
+    """Return a live access token for user_id, refreshing if needed. None if not connected."""
+    from .. import storage
+
+    access, refresh, expiry, _ = storage.get_google_tokens(user_id)
+    if not access:
+        return None
+
+    now = datetime.now(timezone.utc)
+    needs_refresh = expiry is None or expiry <= now + timedelta(minutes=2)
+
+    if needs_refresh and refresh:
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            log.warning("gw subprocess timed out: gw %s", " ".join(args))
-            return ""
-        if proc.returncode != 0:
-            log.warning("gw exited %d: %s", proc.returncode, (stderr or b"").decode()[:200])
-            return ""
-        return stdout.decode(errors="replace")
-    except asyncio.TimeoutError:
-        log.warning("gw subprocess start timed out: gw %s", " ".join(args))
-        return ""
-    except FileNotFoundError:
-        log.warning("gw binary not found at %s", _GW_PATH)
-        return ""
-    except Exception as e:
-        log.warning("gw subprocess error: %s", e)
-        return ""
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": _GOOGLE_CLIENT_ID,
+                        "client_secret": _GOOGLE_CLIENT_SECRET,
+                        "refresh_token": refresh,
+                        "grant_type": "refresh_token",
+                    },
+                    timeout=_API_TIMEOUT,
+                )
+            if r.status_code == 200:
+                data = r.json()
+                new_access = data["access_token"]
+                new_expiry = now + timedelta(seconds=data.get("expires_in", 3600))
+                storage.set_google_tokens(
+                    user_id,
+                    access_token=new_access,
+                    refresh_token=refresh,
+                    expiry=new_expiry,
+                    email=storage.get_google_tokens(user_id)[3],
+                )
+                return new_access
+            else:
+                log.warning("Google token refresh failed: %s", r.status_code)
+                return None
+        except Exception as e:
+            log.warning("Google token refresh error: %s", e)
+            return None
+
+    return access if not needs_refresh else None
 
 
 def _fmt_dt(dt: datetime) -> str:
-    """Format datetime as RFC3339 for gw calendar."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
 
 
 def _fmt_date_for_gmail(dt: datetime) -> str:
-    """Format date as YYYY/MM/DD for Gmail search."""
     return dt.strftime("%Y/%m/%d")
 
 
-async def gmail_context(merchant: str, dt: datetime, window_days: int = 3) -> list[str]:
-    """Search Gmail for threads mentioning the merchant near the receipt date.
-
-    Returns a list of subject/snippet strings (max 5).
-    """
-    if not merchant:
+async def gmail_context(
+    merchant: str,
+    dt: datetime,
+    user_id: int | None = None,
+    window_days: int = 3,
+) -> list[str]:
+    """Search Gmail for threads mentioning the merchant near the receipt date."""
+    if not merchant or user_id is None:
         return []
+
+    access_token = await _get_valid_access_token(user_id)
+    if not access_token:
+        return []
+
     after = dt - timedelta(days=window_days)
     before = dt + timedelta(days=window_days)
     query = (
@@ -113,63 +128,76 @@ async def gmail_context(merchant: str, dt: datetime, window_days: int = 3) -> li
         f"after:{_fmt_date_for_gmail(after)} "
         f"before:{_fmt_date_for_gmail(before)}"
     )
-    raw = await _run_gw("gmail", "search", query, "--max-results", "5")
-    if not raw.strip():
-        return []
-    results: list[str] = []
+
     try:
-        data = json.loads(raw)
-        messages = data if isinstance(data, list) else data.get("messages", [])
-        for msg in messages[:5]:
-            subject = msg.get("subject") or msg.get("Subject") or ""
-            sender = msg.get("from") or msg.get("From") or ""
-            snippet = msg.get("snippet") or ""
-            if subject or snippet:
-                parts = []
-                if subject:
-                    parts.append(subject)
-                if sender:
-                    parts.append(f"from {sender}")
-                if snippet and not subject:
-                    parts.append(snippet[:80])
-                results.append(" — ".join(parts))
-    except (json.JSONDecodeError, TypeError):
-        # Non-JSON output: parse line by line
-        for line in raw.strip().splitlines():
-            line = line.strip()
-            if line:
-                results.append(line[:120])
-        results = results[:5]
-    return results
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/threads",
+                params={"q": query, "maxResults": 5},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=_API_TIMEOUT,
+            )
+        if r.status_code != 200:
+            log.warning("Gmail API error: %s", r.status_code)
+            return []
+
+        data = r.json()
+        threads = data.get("threads", [])
+        results: list[str] = []
+        for t in threads[:5]:
+            snippet = t.get("snippet", "")
+            if snippet:
+                results.append(snippet[:120])
+        return results
+    except Exception as e:
+        log.warning("gmail_context error: %s", e)
+        return []
 
 
-async def gcal_context(dt: datetime, window_hours: float = 2.0) -> list[str]:
-    """Fetch Google Calendar events within ±window_hours of the receipt time.
+async def gcal_context(
+    dt: datetime,
+    user_id: int | None = None,
+    window_hours: float = 2.0,
+) -> list[str]:
+    """Fetch Google Calendar events within ±window_hours of the receipt time."""
+    if user_id is None:
+        return []
 
-    Returns a list of event summary strings (max 5).
-    """
+    access_token = await _get_valid_access_token(user_id)
+    if not access_token:
+        return []
+
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     time_min = _fmt_dt(dt - timedelta(hours=window_hours))
     time_max = _fmt_dt(dt + timedelta(hours=window_hours))
-    raw = await _run_gw(
-        "calendar", "events",
-        "--time-min", time_min,
-        "--time-max", time_max,
-        "--max-results", "5",
-    )
-    if not raw.strip():
-        return []
-    results: list[str] = []
+
     try:
-        data = json.loads(raw)
-        events = data if isinstance(data, list) else data.get("items", data.get("events", []))
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                params={
+                    "timeMin": time_min,
+                    "timeMax": time_max,
+                    "maxResults": 5,
+                    "orderBy": "startTime",
+                    "singleEvents": "true",
+                },
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=_API_TIMEOUT,
+            )
+        if r.status_code != 200:
+            log.warning("Calendar API error: %s", r.status_code)
+            return []
+
+        data = r.json()
+        events = data.get("items", [])
+        results: list[str] = []
         for ev in events[:5]:
-            summary = ev.get("summary") or ev.get("title") or "(no title)"
+            summary = ev.get("summary") or "(no title)"
             start = ev.get("start", {})
             start_time = start.get("dateTime") or start.get("date") or ""
             if start_time:
-                # Trim to HH:MM if it's a full ISO datetime
                 try:
                     parsed_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
                     start_time = parsed_start.strftime("%H:%M")
@@ -178,13 +206,10 @@ async def gcal_context(dt: datetime, window_hours: float = 2.0) -> list[str]:
                 results.append(f"{summary} at {start_time}")
             else:
                 results.append(summary)
-    except (json.JSONDecodeError, TypeError):
-        for line in raw.strip().splitlines():
-            line = line.strip()
-            if line:
-                results.append(line[:120])
-        results = results[:5]
-    return results
+        return results
+    except Exception as e:
+        log.warning("gcal_context error: %s", e)
+        return []
 
 
 def _infer_purpose(
@@ -193,11 +218,9 @@ def _infer_purpose(
     merchant: str,
     receipt_type: str,
 ) -> tuple[str | None, float]:
-    """Simple heuristic to infer business purpose from found context."""
     if not calendar_events and not email_threads:
         return None, 0.0
 
-    # Look for work-related keywords in calendar events
     work_keywords = {
         "meeting", "call", "standup", "sync", "review", "interview",
         "conference", "summit", "workshop", "client", "customer",
@@ -206,12 +229,10 @@ def _infer_purpose(
     personal_keywords = {"birthday", "anniversary", "vacation", "holiday", "personal"}
 
     all_text = " ".join(calendar_events + email_threads).lower()
-
     work_hits = sum(1 for kw in work_keywords if kw in all_text)
     personal_hits = sum(1 for kw in personal_keywords if kw in all_text)
 
     if work_hits > personal_hits and calendar_events:
-        # Use first calendar event as the purpose hint
         event_title = calendar_events[0].split(" at ")[0]
         confidence = min(0.4 + 0.1 * work_hits, 0.85)
         return f"{receipt_type.title()} for: {event_title}", confidence
@@ -219,7 +240,6 @@ def _infer_purpose(
         confidence = min(0.3 + 0.1 * work_hits, 0.7)
         return "Work-related (see email context)", confidence
     elif calendar_events:
-        # Has events but no strong signal
         event_title = calendar_events[0].split(" at ")[0]
         return f"Possibly related to: {event_title}", 0.3
     return None, 0.0
@@ -229,16 +249,11 @@ async def triangulate(
     merchant: str,
     dt: datetime,
     receipt_type: str = "other",
+    user_id: int | None = None,
 ) -> TriangulationResult:
-    """Run Gmail + Calendar lookups in parallel and return a TriangulationResult.
+    """Run Gmail + Calendar lookups in parallel and return a TriangulationResult."""
+    import asyncio
 
-    receipt_type adjusts the calendar window:
-      - "transport" → ±2h
-      - "flight"    → full-day (12h each side)
-      - "meal"      → same-day (8h each side)
-      - "hotel"     → same-day (12h each side, check-in biased)
-      - default     → ±2h
-    """
     window_map: dict[str, float] = {
         "transport": 2.0,
         "flight": 12.0,
@@ -247,14 +262,12 @@ async def triangulate(
     }
     window_hours = window_map.get(receipt_type, 2.0)
 
-    cal_task = asyncio.create_task(gcal_context(dt, window_hours=window_hours))
-    gmail_task = asyncio.create_task(gmail_context(merchant, dt, window_days=3))
-
     calendar_events, email_threads = await asyncio.gather(
-        cal_task, gmail_task, return_exceptions=True
+        gcal_context(dt, user_id=user_id, window_hours=window_hours),
+        gmail_context(merchant, dt, user_id=user_id, window_days=3),
+        return_exceptions=True,
     )
 
-    # Exceptions from gather return as exception objects — treat as empty
     if isinstance(calendar_events, Exception):
         log.warning("gcal_context raised: %s", calendar_events)
         calendar_events = []

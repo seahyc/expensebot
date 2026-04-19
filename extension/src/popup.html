@@ -20,8 +20,17 @@
   <h1>Janai</h1>
   <div id="status" class="status warn">Loading…</div>
   <input id="code" placeholder="6-digit pairing code" maxlength="6" autocomplete="off">
-  <button id="pair" disabled>Pair</button>
+  <button id="pair" disabled>Pair with OmniHR</button>
   <div class="small">Get a code from your bot with <code>/pair</code>.</div>
+
+  <hr style="margin: 14px 0; border: none; border-top: 1px solid #e0e0e0;">
+
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Gmail & Calendar</div>
+  <div id="google-status" class="status warn">Not connected</div>
+  <input id="google-code" placeholder="6-digit code from /connect_google" maxlength="6" autocomplete="off">
+  <button id="google-connect">Connect Google</button>
+  <div class="small">Run <code>/connect_google</code> in your bot to get a code.</div>
+
   <script type="module" src="popup.js"></script>
 </body>
 </html>

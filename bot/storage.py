@@ -127,6 +127,10 @@ _ADD_COLS = [
     ("users", "last_inbound_at", "TEXT"),      # ISO UTC; bumped on any inbound msg
     ("users", "profile_md", "TEXT"),
     ("users", "submit_count", "INTEGER DEFAULT 0"),
+    ("users", "google_access_token", "TEXT"),  # encrypted; Google OAuth
+    ("users", "google_refresh_token", "TEXT"), # encrypted; Google OAuth
+    ("users", "google_token_expiry", "TEXT"),  # ISO UTC
+    ("users", "google_email", "TEXT"),         # connected Google account email
 ]
 
 
@@ -235,6 +239,46 @@ def get_anth_oauth(user_id: int) -> tuple[str | None, str | None, datetime | Non
         refresh = crypto.decrypt(row["anth_refresh_token"]) if row["anth_refresh_token"] else None
         exp = datetime.fromisoformat(row["anth_expires_at"]) if row["anth_expires_at"] else None
         return access, refresh, exp
+
+
+def set_google_tokens(
+    user_id: int,
+    *,
+    access_token: str,
+    refresh_token: str | None,
+    expiry: datetime | None,
+    email: str | None,
+) -> None:
+    with db() as conn:
+        conn.execute(
+            """UPDATE users SET
+               google_access_token=?, google_refresh_token=?,
+               google_token_expiry=?, google_email=?
+               WHERE id=?""",
+            (
+                crypto.encrypt(access_token),
+                crypto.encrypt(refresh_token) if refresh_token else None,
+                expiry.isoformat() if expiry else None,
+                email,
+                user_id,
+            ),
+        )
+
+
+def get_google_tokens(user_id: int) -> tuple[str | None, str | None, datetime | None, str | None]:
+    """Return (access_token, refresh_token, expiry, email). All may be None."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT google_access_token, google_refresh_token, google_token_expiry, google_email "
+            "FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None, None, None, None
+        access = crypto.decrypt(row["google_access_token"]) if row["google_access_token"] else None
+        refresh = crypto.decrypt(row["google_refresh_token"]) if row["google_refresh_token"] else None
+        expiry = datetime.fromisoformat(row["google_token_expiry"]) if row["google_token_expiry"] else None
+        return access, refresh, expiry, row["google_email"]
 
 
 # Memory structure borrowed from Claude Code's auto-memory system:

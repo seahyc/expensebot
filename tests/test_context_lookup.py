@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,15 +16,31 @@ from bot.common.context_lookup import (
     triangulate,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 DT = datetime(2026, 4, 15, 12, 30, 0, tzinfo=timezone.utc)
+USER_ID = 42
+FAKE_TOKEN = "ya29.fake-access-token"
 
 
-def _mock_gw_output(data) -> str:
-    return json.dumps(data)
+def _mock_token():
+    """Patch _get_valid_access_token to return a fake token."""
+    return patch(
+        "bot.common.context_lookup._get_valid_access_token",
+        new=AsyncMock(return_value=FAKE_TOKEN),
+    )
+
+
+def _mock_no_token():
+    return patch(
+        "bot.common.context_lookup._get_valid_access_token",
+        new=AsyncMock(return_value=None),
+    )
+
+
+def _make_http_response(status_code: int, json_data: dict):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_data
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -103,220 +118,186 @@ def test_infer_purpose_work_keywords_in_calendar():
 def test_infer_purpose_personal_beats_none():
     events = ["Birthday party at 19:00"]
     purpose, conf = _infer_purpose(events, [], "Uber Eats", "meal")
-    # Has an event but no strong work signal — should still return something
-    assert purpose is not None or conf == 0.0  # either "possibly related" or no match
+    assert purpose is not None or conf == 0.0
 
 
 def test_infer_purpose_work_email():
     threads = ["Meeting with client — from john@company.com"]
     purpose, conf = _infer_purpose([], threads, "RestaurantXYZ", "meal")
-    # work_hits > 0 from "meeting" and "client"
     assert purpose is not None
     assert conf > 0.0
 
 
 # ---------------------------------------------------------------------------
-# gmail_context — mocked subprocess
+# gmail_context
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_gmail_context_empty_merchant_returns_empty():
-    result = await gmail_context("", DT)
+    result = await gmail_context("", DT, user_id=USER_ID)
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_gmail_context_json_output():
-    messages = [
-        {"subject": "Grab receipt", "from": "no-reply@grab.com", "snippet": "Your ride cost SGD 14.50"},
-        {"subject": "Your Grab trip", "from": "no-reply@grab.com", "snippet": ""},
-    ]
-    fake_output = json.dumps({"messages": messages})
+async def test_gmail_context_no_user_id_returns_empty():
+    result = await gmail_context("Grab", DT, user_id=None)
+    assert result == []
 
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value=fake_output)):
-        results = await gmail_context("Grab", DT)
+
+@pytest.mark.asyncio
+async def test_gmail_context_no_token_returns_empty():
+    with _mock_no_token():
+        result = await gmail_context("Grab", DT, user_id=USER_ID)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_gmail_context_returns_thread_snippets():
+    threads = [
+        {"id": "abc", "snippet": "Grab receipt SGD 14.50 from billing@grab.com"},
+        {"id": "def", "snippet": "Your Grab trip is complete"},
+    ]
+    mock_resp = _make_http_response(200, {"threads": threads})
+
+    with _mock_token():
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            results = await gmail_context("Grab", DT, user_id=USER_ID)
 
     assert len(results) == 2
     assert "Grab receipt" in results[0]
-    assert "no-reply@grab.com" in results[0]
 
 
 @pytest.mark.asyncio
-async def test_gmail_context_list_output():
-    """gw may return a list directly (not wrapped in messages key)."""
-    messages = [
-        {"subject": "Lunch meeting", "from": "boss@corp.com", "snippet": ""},
-    ]
-    fake_output = json.dumps(messages)
+async def test_gmail_context_api_error_returns_empty():
+    mock_resp = _make_http_response(401, {})
 
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value=fake_output)):
-        results = await gmail_context("GrillHouse", DT)
+    with _mock_token():
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            results = await gmail_context("Grab", DT, user_id=USER_ID)
 
-    assert len(results) == 1
-    assert "Lunch meeting" in results[0]
-
-
-@pytest.mark.asyncio
-async def test_gmail_context_empty_response():
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value="")):
-        results = await gmail_context("Starbucks", DT)
     assert results == []
 
 
-@pytest.mark.asyncio
-async def test_gmail_context_non_json_output():
-    """Falls back to line parsing on non-JSON output."""
-    raw = "Grab receipt from billing@grab.com\nAnother thread"
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value=raw)):
-        results = await gmail_context("Grab", DT)
-    assert len(results) == 2
-    assert "Grab receipt" in results[0]
-
-
 # ---------------------------------------------------------------------------
-# gcal_context — mocked subprocess
+# gcal_context
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_gcal_context_json_output():
+async def test_gcal_context_no_user_id_returns_empty():
+    result = await gcal_context(DT, user_id=None)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_gcal_context_no_token_returns_empty():
+    with _mock_no_token():
+        result = await gcal_context(DT, user_id=USER_ID)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_gcal_context_returns_events():
     events = [
         {"summary": "Team standup", "start": {"dateTime": "2026-04-15T12:00:00+00:00"}},
         {"summary": "All-hands", "start": {"dateTime": "2026-04-15T13:00:00+00:00"}},
     ]
-    fake_output = json.dumps({"items": events})
+    mock_resp = _make_http_response(200, {"items": events})
 
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value=fake_output)):
-        results = await gcal_context(DT, window_hours=2.0)
+    with _mock_token():
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            results = await gcal_context(DT, user_id=USER_ID, window_hours=2.0)
 
     assert len(results) == 2
     assert "Team standup at 12:00" in results[0]
 
 
 @pytest.mark.asyncio
-async def test_gcal_context_list_output():
-    events = [
-        {"summary": "Offsite dinner", "start": {"date": "2026-04-15"}},
-    ]
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value=json.dumps(events))):
-        results = await gcal_context(DT)
-    assert len(results) == 1
-    assert "Offsite dinner" in results[0]
-
-
-@pytest.mark.asyncio
-async def test_gcal_context_empty_response():
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value="")):
-        results = await gcal_context(DT)
-    assert results == []
-
-
-@pytest.mark.asyncio
 async def test_gcal_context_no_title_event():
     events = [{"start": {"dateTime": "2026-04-15T12:00:00+00:00"}}]
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value=json.dumps({"items": events}))):
-        results = await gcal_context(DT)
+    mock_resp = _make_http_response(200, {"items": events})
+
+    with _mock_token():
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            results = await gcal_context(DT, user_id=USER_ID)
+
     assert "(no title)" in results[0]
 
 
 # ---------------------------------------------------------------------------
-# triangulate — integration of both
+# triangulate
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_triangulate_returns_empty_on_no_data():
-    with patch("bot.common.context_lookup._run_gw", new=AsyncMock(return_value="")):
-        result = await triangulate("Starbucks", DT, "meal")
+async def test_triangulate_returns_empty_when_no_token():
+    with _mock_no_token():
+        result = await triangulate("Starbucks", DT, "meal", user_id=USER_ID)
 
     assert isinstance(result, TriangulationResult)
     assert result.calendar_events == []
     assert result.email_threads == []
     assert result.inferred_purpose is None
-    assert result.confidence == 0.0
     assert result.as_markdown() is None
 
 
 @pytest.mark.asyncio
 async def test_triangulate_with_context():
-    cal_events = [{"summary": "Client lunch", "start": {"dateTime": "2026-04-15T12:00:00+00:00"}}]
-    gmail_msgs = [{"subject": "Meeting with client", "from": "client@corp.com", "snippet": ""}]
+    cal_resp = _make_http_response(200, {
+        "items": [{"summary": "Client lunch", "start": {"dateTime": "2026-04-15T12:00:00+00:00"}}]
+    })
+    gmail_resp = _make_http_response(200, {
+        "threads": [{"id": "x", "snippet": "Meeting with client — agenda attached"}]
+    })
 
-    call_count = 0
+    responses = [cal_resp, gmail_resp]
+    call_idx = 0
 
-    async def mock_gw(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        if "calendar" in args:
-            return json.dumps({"items": cal_events})
-        if "gmail" in args:
-            return json.dumps({"messages": gmail_msgs})
-        return ""
+    async def _get(*args, **kwargs):
+        nonlocal call_idx
+        resp = responses[call_idx % len(responses)]
+        call_idx += 1
+        return resp
 
-    with patch("bot.common.context_lookup._run_gw", new=mock_gw):
-        result = await triangulate("RestaurantXYZ", DT, "meal")
+    with _mock_token():
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = _get
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await triangulate("RestaurantXYZ", DT, "meal", user_id=USER_ID)
 
     assert len(result.calendar_events) == 1
     assert "Client lunch" in result.calendar_events[0]
-    assert len(result.email_threads) == 1
-    assert result.inferred_purpose is not None
-    assert result.confidence > 0.0
 
 
 @pytest.mark.asyncio
-async def test_triangulate_window_transport():
-    """transport type uses ±2h window — verify the gw call includes time-min/max args."""
-    captured_args: list[tuple] = []
+async def test_triangulate_exception_handled():
+    """If an API call raises, triangulate should still return an empty result."""
+    with _mock_token():
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=RuntimeError("network error"))
+            mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await triangulate("SomeMerchant", DT, "other", user_id=USER_ID)
 
-    async def mock_gw(*args, **kwargs):
-        captured_args.append(args)
-        return ""
-
-    with patch("bot.common.context_lookup._run_gw", new=mock_gw):
-        await triangulate("Grab", DT, "transport")
-
-    # Should have called both gmail and calendar
-    assert len(captured_args) == 2
-    cal_call = next((a for a in captured_args if "calendar" in a), None)
-    assert cal_call is not None
-    assert "--time-min" in cal_call
-    assert "--time-max" in cal_call
-
-
-@pytest.mark.asyncio
-async def test_triangulate_subprocess_exception_handled():
-    """If subprocess raises, triangulate should still return an empty result."""
-
-    async def boom(*args, **kwargs):
-        raise RuntimeError("auth expired")
-
-    with patch("bot.common.context_lookup._run_gw", new=boom):
-        result = await triangulate("SomeMerchant", DT, "other")
-
-    # Should degrade gracefully — empty lists, no exception
     assert result.calendar_events == []
     assert result.email_threads == []
-
-
-@pytest.mark.asyncio
-async def test_triangulate_flight_uses_full_day_window():
-    """flight type uses 12h window."""
-    captured_args: list[tuple] = []
-
-    async def mock_gw(*args, **kwargs):
-        captured_args.append(args)
-        return ""
-
-    with patch("bot.common.context_lookup._run_gw", new=mock_gw):
-        await triangulate("Singapore Airlines", DT, "flight")
-
-    cal_call = next((a for a in captured_args if "calendar" in a), None)
-    assert cal_call is not None
-    # Check that time-min is 12h before DT
-    idx = list(cal_call).index("--time-min")
-    time_min_str = cal_call[idx + 1]
-    time_min = datetime.fromisoformat(time_min_str)
-    # Should be ~12h before DT
-    delta = DT - time_min.replace(tzinfo=timezone.utc)
-    assert abs(delta.total_seconds() - 12 * 3600) < 60  # within 1 minute

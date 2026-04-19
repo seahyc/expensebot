@@ -74,6 +74,8 @@ log = logging.getLogger("expensebot")
 
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8000")
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
 REPO_ROOT = Path(__file__).parent.parent
 TENANTS_DIR = REPO_ROOT / "tenants"
@@ -554,6 +556,29 @@ async def cmd_pair(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"_Code expires in 5 minutes._",
         parse_mode="Markdown",
         disable_web_page_preview=True,
+    )
+
+
+async def cmd_connect_google(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update):
+        return
+    user_db_id = storage.upsert_user("telegram", str(update.effective_user.id))
+    if not await _check_rate(update, user_db_id, "pair"):
+        return
+    if not GOOGLE_CLIENT_ID:
+        await update.message.reply_text(
+            "⚠️ Google integration isn't configured yet — ask your admin to set GOOGLE_CLIENT_ID."
+        )
+        return
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    storage.create_pairing_code(user_db_id, code, ttl_seconds=300)
+    await update.message.reply_text(
+        f"```\n{code}\n```\n"
+        f"👆 Tap the code to copy.\n\n"
+        f"Then open the *Janai* extension on any tab and use the "
+        f"*Connect Gmail & Calendar* section — paste this code and click *Connect Google*.\n\n"
+        f"_Code expires in 5 minutes._",
+        parse_mode="Markdown",
     )
 
 
@@ -1044,6 +1069,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     merchant=parsed.merchant or "",
                     dt=dt,
                     receipt_type=_infer_receipt_type(parsed),
+                    user_id=pending.u.get("id"),
                 ),
                 timeout=5.0,
             )
@@ -1343,7 +1369,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                 dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
             except ValueError:
                 dt = datetime.now()
-            results = await asyncio.wait_for(context_lookup.gmail_context(merchant, dt), timeout=5.0)
+            results = await asyncio.wait_for(context_lookup.gmail_context(merchant, dt, user_id=u.get("id")), timeout=5.0)
             return "\n".join(results) if results else "No relevant emails found."
 
         elif tool_name == "search_calendar_context":
@@ -1353,7 +1379,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                 dt = datetime.fromisoformat(f"{date_hint}T{time_hint}" if time_hint else date_hint)
             except ValueError:
                 dt = datetime.now()
-            results = await asyncio.wait_for(context_lookup.gcal_context(dt), timeout=5.0)
+            results = await asyncio.wait_for(context_lookup.gcal_context(dt, user_id=u.get("id")), timeout=5.0)
             return "\n".join(results) if results else "No calendar events found near this time."
 
         return f"Unknown tool: {tool_name}"
@@ -1665,6 +1691,7 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         merchant=parsed.merchant,
                         dt=receipt_dt,
                         receipt_type=_infer_receipt_type(parsed),
+                        user_id=u.get("id"),
                     ),
                     timeout=2.0,
                 )
@@ -2078,6 +2105,92 @@ async function submitKey(){{
 
         return {"ok": True, "user_id": user_db_id}
 
+    @app.get("/config/google")
+    async def config_google() -> dict:
+        return {"client_id": GOOGLE_CLIENT_ID}
+
+    @app.post("/extension/google-auth")
+    async def extension_google_auth(p: dict[str, Any], request: Request) -> dict:
+        client_ip = (request.client.host if request.client else "unknown") or "unknown"
+        ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
+        if not ok:
+            raise HTTPException(status_code=429, detail="Too many attempts", headers={"Retry-After": str(retry)})
+
+        pairing_code = p.get("pairing_code", "")
+        auth_code = p.get("auth_code", "")
+        redirect_uri = p.get("redirect_uri", "")
+
+        if not re.fullmatch(r"\d{6}", pairing_code):
+            raise HTTPException(status_code=400, detail="Pairing code must be 6 digits")
+        if not auth_code:
+            raise HTTPException(status_code=400, detail="auth_code required")
+        if not redirect_uri:
+            raise HTTPException(status_code=400, detail="redirect_uri required")
+        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+            raise HTTPException(status_code=503, detail="Google integration not configured")
+
+        user_db_id = storage.consume_pairing_code(pairing_code)
+        if not user_db_id:
+            raise HTTPException(status_code=404, detail="Pairing code invalid or expired")
+
+        # Exchange auth code for tokens
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "code": auth_code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": redirect_uri,
+                },
+                timeout=10.0,
+            )
+        if r.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Google token exchange failed: {r.text[:200]}")
+
+        token_data = r.json()
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token")
+        expires_in = token_data.get("expires_in", 3600)
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
+        # Fetch the user's Google email
+        google_email: str | None = None
+        async with httpx.AsyncClient() as http:
+            info_r = await http.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=5.0,
+            )
+        if info_r.status_code == 200:
+            google_email = info_r.json().get("email")
+
+        storage.set_google_tokens(
+            user_db_id,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expiry=expiry,
+            email=google_email,
+        )
+
+        # DM confirmation
+        if tg_app:
+            user = storage.get_user(user_db_id)
+            try:
+                await tg_app.bot.send_message(
+                    chat_id=int(user["channel_user_id"]),
+                    text=(
+                        f"✅ Gmail & Calendar connected"
+                        + (f" ({google_email})" if google_email else "")
+                        + ".\n\nI'll now search your emails and calendar when you send receipts."
+                    ),
+                )
+            except Exception as e:
+                log.warning("Couldn't DM after google-auth: %s", e)
+
+        return {"ok": True, "email": google_email}
+
     return app
 
 
@@ -2101,6 +2214,7 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("delete", cmd_delete))
     tg_app.add_handler(CommandHandler("submit", cmd_submit))
     tg_app.add_handler(CommandHandler("memories", cmd_memories))
+    tg_app.add_handler(CommandHandler("connect_google", cmd_connect_google))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
