@@ -149,6 +149,9 @@ def _infer_receipt_type(parsed: ParsedReceipt) -> str:
 # keyed by Telegram chat_id (int)
 _pending_files: dict[int, _PendingFile] = {}
 
+# Open ask_choice prompts keyed by chat_id → list of option labels (index = callback_data).
+_pending_choices: dict[int, list[str]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Tenant / user prompts
@@ -1051,6 +1054,32 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     u = storage.get_user_by_channel("telegram", str(q.from_user.id))
     action, _, rest = q.data.partition(":")
 
+    if action == "choice":
+        await q.answer()
+        chat_id = q.message.chat_id if q.message else q.from_user.id
+        try:
+            idx = int(rest)
+        except ValueError:
+            return
+        options = _pending_choices.pop(chat_id, None)
+        if not options or idx < 0 or idx >= len(options):
+            try:
+                await q.edit_message_text("(Choice expired — please retry.)")
+            except Exception:
+                pass
+            return
+        chosen = options[idx]
+        try:
+            prev_text = q.message.text if q.message and q.message.text else ""
+            await q.edit_message_text(f"{prev_text}\n\n→ {chosen}")
+        except Exception:
+            pass
+        # Re-enter the agent as if the user had typed the chosen label.
+        if u is None:
+            return
+        await _run_agent_turn_for_text(u=u, chat_id=chat_id, text=chosen, bot=ctx.bot)
+        return
+
     # --- Receipt confirmation / policy-pick callbacks (no OmniHR auth guard needed for cancel) ---
     if action == "cancel_file":
         await q.answer()
@@ -1697,6 +1726,39 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             )
             return f"Fetched '{att_filename}' from your Gmail — sending it now for review. Use the buttons to file or skip."
 
+        elif tool_name == "ask_choice":
+            if bot is None or chat_id is None:
+                return "ask_choice: no bot/chat_id in scope (can't send buttons)."
+            question = (tool_input.get("question") or "").strip()
+            options = [str(o).strip() for o in (tool_input.get("options") or []) if str(o).strip()]
+            suggested = (tool_input.get("suggested") or "").strip()
+            if not question or not options:
+                return "ask_choice requires question + options."
+            if len(options) > 8:
+                options = options[:8]
+            # Move suggested to the top, prefix with ⭐
+            ordered: list[tuple[str, str]] = []  # (display_label, canonical_label)
+            if suggested and suggested in options:
+                ordered.append((f"⭐ {suggested}", suggested))
+                for o in options:
+                    if o != suggested:
+                        ordered.append((o, o))
+            else:
+                ordered = [(o, o) for o in options]
+            _pending_choices[chat_id] = [canon for _disp, canon in ordered]
+            rows: list[list[InlineKeyboardButton]] = []
+            for i, (disp, _canon) in enumerate(ordered):
+                rows.append([InlineKeyboardButton(disp[:60], callback_data=f"choice:{i}")])
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=question,
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+            except Exception as e:
+                return f"ask_choice failed to send buttons: {e}"
+            return "Asked the user via buttons — ending turn; a new turn will fire when they tap."
+
         elif tool_name == "confirm_pending_receipt":
             if chat_id is None:
                 return "confirm_pending_receipt: no chat_id in scope."
@@ -1865,6 +1927,52 @@ async def _keep_typing(bot, chat_id: int, stop_event: asyncio.Event) -> None:
             await asyncio.wait_for(asyncio.shield(stop_event.wait()), timeout=4.0)
         except asyncio.TimeoutError:
             pass
+
+
+async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot) -> None:
+    """Run one Janai turn as if the user had typed `text`. Used by button-choice callbacks."""
+    try:
+        anth = await anthropic_for(u)
+    except RuntimeError as e:
+        log.warning("_run_agent_turn_for_text: no anthropic for user=%s: %s", u.get("id"), e)
+        return
+    storage.log_message(u["id"], "in", text)
+    storage.bump_last_inbound_at(u["id"])
+    user_md = load_user_md(u)
+    executor = await _build_tool_executor(u, bot=bot, chat_id=chat_id)
+    history = storage.get_recent_messages(u["id"], limit=12)
+    pending_receipt_md: str | None = None
+    _pf = _pending_files.get(chat_id)
+    if _pf:
+        _p = _pf.parsed
+        pol = next((p.label for p in _pf.policies if p.id == _p.suggested_policy_id), f"#{_p.suggested_policy_id}") if _p.suggested_policy_id else "?"
+        pending_receipt_md = (
+            f"- merchant: {_p.merchant}\n- amount: {_p.currency or 'SGD'} {_p.amount}\n"
+            f"- date: {_p.receipt_date}\n- suggested policy: {pol}\n"
+            f"- suggested sub-category: {_p.suggested_sub_category_label or '(none)'}\n"
+            f"- description draft: {_p.description_draft or '(none)'}\n- file: {_pf.filename}"
+        )
+    try:
+        reply = await run_agent(
+            anthropic=anth,
+            user_message=text,
+            has_file=False,
+            user_md=user_md,
+            profile_md=storage.get_profile_md(u["id"]),
+            boss_profile_md=storage.get_boss_profile_md(u["id"]),
+            tool_executor=executor,
+            conversation_history=history,
+            user=u,
+            pending_receipt_md=pending_receipt_md,
+        )
+    except Exception as e:
+        log.warning("agent failed in choice callback: %s", e)
+        reply = f"Something went wrong: {e}"
+    storage.log_message(u["id"], "out", reply)
+    try:
+        await bot.send_message(chat_id=chat_id, text=reply, parse_mode="Markdown")
+    except Exception:
+        await bot.send_message(chat_id=chat_id, text=reply)
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -359,6 +359,37 @@ TOOLS = [
         },
     },
     {
+        "name": "ask_choice",
+        "description": (
+            "Ask the user a multiple-choice question with Telegram inline buttons. "
+            "Use when the answer is drawn from a small known set (2-8 options) — e.g. "
+            "sub-category, policy picker, yes/no-with-reason, or confirming which of N "
+            "matching receipts to act on. Do NOT use for open-ended questions (dates, "
+            "destinations, amounts) — ask those in plain text. "
+            "Put the most likely answer first in `options` and pass it as `suggested` — "
+            "it will be rendered with a ⭐ prefix. Base the suggestion on merchant "
+            "memory, past categorizations, and policy constraints. "
+            "This ends your turn; Janai will be re-invoked with the chosen label when "
+            "the user taps a button, with the same pending receipt / chat state intact."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The question text shown above the buttons (max ~200 chars)"},
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Option labels (each ≤60 chars). Order matters — put the most likely first.",
+                },
+                "suggested": {
+                    "type": "string",
+                    "description": "Optional — the label you're recommending. Must match one of the options exactly. Rendered with ⭐.",
+                },
+            },
+            "required": ["question", "options"],
+        },
+    },
+    {
         "name": "confirm_pending_receipt",
         "description": (
             "File the receipt that was just parsed and is sitting in 'Pending receipt' "
