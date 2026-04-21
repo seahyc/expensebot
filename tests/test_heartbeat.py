@@ -342,6 +342,35 @@ async def test_actionable_response_sends_message(runner, mock_bot, mock_anth, tm
     assert call_kwargs.kwargs.get("chat_id") == int(tg_chat_id)
 
 
+@pytest.mark.asyncio
+async def test_actionable_response_is_logged_to_messages(runner, mock_bot, mock_anth, tmp_db):
+    """Regression: heartbeat nudges must be persisted to the messages table so the
+    agent sees its own prior proactive questions in get_recent_messages history.
+    Otherwise a user reply like 'yeah can file' gets routed to the wrong pending
+    question because the nudge is invisible in the conversation transcript."""
+    tg_chat_id = "5550000"
+    uid = storage.upsert_user("telegram", tg_chat_id)
+    future = datetime.now(timezone.utc) + timedelta(days=30)
+    storage.set_omnihr_session(
+        uid,
+        access_jwt="a", refresh_jwt="r",
+        access_expires_at=future, refresh_expires_at=future,
+        employee_id=42, full_name="HB", email="hb@h.com", tenant_id="hb",
+    )
+    user = storage.get_user(uid)
+
+    nudge_text = "Found one unread email from Cloudflare. Want me to file it?"
+    mock_anth.messages.create.return_value = _make_text_response(nudge_text)
+
+    before = storage.get_recent_messages(uid, limit=20)
+    await runner._tick_user({**user, "channel": "telegram", "channel_user_id": tg_chat_id}, runner._load_tasks())
+    after = storage.get_recent_messages(uid, limit=20)
+
+    new_out = [m for m in after if m not in before and m["direction"] == "out"]
+    assert new_out, "heartbeat should have written at least one outbound message"
+    assert any(nudge_text in (m["body"] or "") for m in new_out)
+
+
 # ---------------------------------------------------------------------------
 # Cooldown: nudged recently → skip task
 # ---------------------------------------------------------------------------
