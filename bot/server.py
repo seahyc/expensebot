@@ -860,8 +860,9 @@ def _build_confirm_message(
         InlineKeyboardButton("✏️ Edit description", callback_data="edit_desc:"),
     ]
     if sha:
+        # Telegram callback_data max is 64 bytes; full sha256 is 64 chars alone.
         correction_row.append(
-            InlineKeyboardButton("🔄 Search again", callback_data=f"retriangulate:{sha}")
+            InlineKeyboardButton("🔄 Search again", callback_data=f"retriangulate:{sha[:16]}")
         )
 
     if not parsed.suggested_policy_id:
