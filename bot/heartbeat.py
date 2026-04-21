@@ -309,27 +309,16 @@ def _build_heartbeat_tool_executor(user: dict, omnihr_factory):
             if not query:
                 return "No query provided."
             try:
-                # Use _run_gw directly for a free-form Gmail query
-                from .common.context_lookup import _run_gw
-                raw = await _run_gw("gmail", "search", query, "--max-results", "5")
-                if not raw.strip():
+                from .common.context_lookup import gmail_context
+                results = await gmail_context(
+                    merchant=query,
+                    dt=datetime.now(timezone.utc),
+                    user_id=user["id"],
+                    window_days=3,
+                )
+                if not results:
                     return "No matching emails found."
-                try:
-                    data = json.loads(raw)
-                    messages = data if isinstance(data, list) else data.get("messages", [])
-                    results = []
-                    for msg in messages[:5]:
-                        subject = msg.get("subject") or msg.get("Subject") or ""
-                        sender = msg.get("from") or msg.get("From") or ""
-                        if subject:
-                            entry = subject
-                            if sender:
-                                entry += f" (from {sender})"
-                            results.append(entry)
-                    return "\n".join(results) if results else "No matching emails found."
-                except (json.JSONDecodeError, TypeError):
-                    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
-                    return "\n".join(lines[:5]) if lines else "No matching emails found."
+                return "\n\n".join(results[:5])
             except Exception as e:
                 log.warning("search_email_context failed in heartbeat for user=%s: %s", user["id"], e)
                 return f"Error searching Gmail: {e}"
