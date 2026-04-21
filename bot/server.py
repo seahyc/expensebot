@@ -1717,6 +1717,14 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             try:
                 async with client_for(u) as client:
                     schema = await client.schema(policy_id, receipt_date)
+                    receipts_field = schema.field_by_fdt("RECEIPTS")
+                    if receipts_field and receipts_field.is_mandatory:
+                        return (
+                            f"file_expense can't create a receipt-less draft for this policy — "
+                            f"'{receipts_field.label}' is mandatory. "
+                            f"Ask the user to send a receipt image/PDF so parse_receipt or "
+                            f"file_from_email can attach it."
+                        )
                     values: dict[str, Any] = {
                         "AMOUNT": {"amount": str(amount), "amount_currency": currency},
                         "MERCHANT": merchant,

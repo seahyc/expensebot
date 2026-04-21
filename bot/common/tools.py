@@ -357,11 +357,13 @@ TOOLS = [
     {
         "name": "file_expense",
         "description": (
-            "Create an OmniHR expense draft from structured data — no receipt image needed. "
-            "Use when you already know the merchant, amount, date, and currency from an email, "
-            "WhatsApp message, or the user telling you directly. "
+            "Create an OmniHR expense draft from structured data — for policies that allow "
+            "receipt-less drafts. Use when you already know the merchant, amount, date, and "
+            "currency from a text source (email body, WhatsApp message, user-reported). "
             "Call get_omnihr_context FIRST so you know the right policy to use. "
-            "The draft will be created without an attached receipt; the user can add one later."
+            "NOTE: many policies (e.g. Travel - Local) REQUIRE a receipt attachment — this tool "
+            "will refuse and tell you to use parse_receipt or file_from_email instead. If that "
+            "happens, ask the user to send a receipt image/PDF rather than retrying."
         ),
         "input_schema": {
             "type": "object",
