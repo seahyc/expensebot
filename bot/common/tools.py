@@ -335,10 +335,14 @@ TOOLS = [
     {
         "name": "file_from_email",
         "description": (
-            "Find a receipt email in Gmail, download its attachment, and file it as an OmniHR draft. "
-            "Use when the user wants to file an expense from an email receipt (e.g. Ryde, Grab, airline). "
-            "Call get_omnihr_context FIRST. Then call this with the merchant/sender name and date. "
-            "This downloads the PDF/image attachment from the email and goes through the full parse flow."
+            "Find a receipt email in Gmail and file it as an OmniHR draft. "
+            "Use when the user wants to file an expense from an email receipt (e.g. Ryde, Grab, "
+            "Challenger, airline). Call get_omnihr_context FIRST. Then call this with the "
+            "merchant/sender name and date. "
+            "This prefers a PDF/image attachment. If the email has no attachment (common for "
+            "HTML e-receipts — Grab, Challenger, Ryde), it automatically renders the email body "
+            "as a PDF and runs the same parse flow — so you can call this even for text-only "
+            "email receipts and it will just work."
         ),
         "input_schema": {
             "type": "object",

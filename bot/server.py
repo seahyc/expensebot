@@ -1672,7 +1672,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             attach = await fetch_gmail_attachment(query, user_id=u["id"])
             if not attach:
                 return (
-                    f"No attachment found in Gmail for query: '{query}'. "
+                    f"No matching email in Gmail for query: '{query}'. "
                     "Try a different search (e.g. 'from:ryde') or forward the email to me."
                 )
             att_bytes, att_filename, att_mime = attach

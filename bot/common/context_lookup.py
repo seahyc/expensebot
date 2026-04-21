@@ -278,6 +278,51 @@ async def gmail_context(
     return results[:max_results * len(tokens)]
 
 
+def _extract_html_body(payload: dict) -> str:
+    """Recursively extract text/html body from a Gmail message payload."""
+    import base64
+    mime = payload.get("mimeType", "")
+    if mime == "text/html":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            try:
+                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+            except Exception:
+                return ""
+    for part in payload.get("parts", []):
+        html = _extract_html_body(part)
+        if html:
+            return html
+    return ""
+
+
+def _render_email_to_pdf(subject: str, sender: str, date_hdr: str, html_or_text: str, is_html: bool) -> bytes:
+    """Render an email (HTML preferred, plain-text fallback) into a PDF receipt via WeasyPrint."""
+    from weasyprint import HTML
+    if is_html:
+        # Prepend a small header so the parser sees subject/sender/date.
+        wrapped = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>body{font-family:sans-serif;padding:24px;}"
+            ".hdr{border-bottom:1px solid #ccc;padding-bottom:8px;margin-bottom:16px;color:#555;font-size:12px;}"
+            "</style></head><body>"
+            f"<div class='hdr'><strong>{subject}</strong><br>{sender}<br>{date_hdr}</div>"
+            f"{html_or_text}</body></html>"
+        )
+    else:
+        import html as _html_mod
+        wrapped = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>body{font-family:sans-serif;padding:24px;white-space:pre-wrap;}"
+            ".hdr{border-bottom:1px solid #ccc;padding-bottom:8px;margin-bottom:16px;color:#555;font-size:12px;}"
+            "</style></head><body>"
+            f"<div class='hdr'><strong>{_html_mod.escape(subject)}</strong><br>"
+            f"{_html_mod.escape(sender)}<br>{_html_mod.escape(date_hdr)}</div>"
+            f"{_html_mod.escape(html_or_text)}</body></html>"
+        )
+    return HTML(string=wrapped).write_pdf()
+
+
 async def fetch_gmail_attachment(
     query: str,
     user_id: int,
@@ -286,13 +331,18 @@ async def fetch_gmail_attachment(
     """Search Gmail for `query`, return the first attachment as (bytes, filename, mime_type).
 
     Tries messages matching `query`, walks their MIME parts for a file attachment
-    whose mime type starts with one of `preferred_types`. Returns None if nothing found.
+    whose mime type starts with one of `preferred_types`. If no binary attachment
+    is found, falls back to rendering the first matching email's HTML body to a PDF
+    so text-only e-receipts (Grab, Challenger, Ryde) still flow through parse_receipt.
+    Returns None if no message matches the query at all.
     """
     import base64
 
     tokens = await _get_all_valid_access_tokens(user_id)
     if not tokens:
         return None
+
+    first_body_message: dict | None = None  # fallback candidate if no binary attachment found
 
     async with httpx.AsyncClient() as client:
         for _email, access_token in tokens:
@@ -323,6 +373,8 @@ async def fetch_gmail_attachment(
                     if mr.status_code != 200:
                         continue
                     msg = mr.json()
+                    if first_body_message is None:
+                        first_body_message = msg
 
                     # Flatten all MIME parts
                     def _parts(payload: dict) -> list[dict]:
@@ -351,6 +403,28 @@ async def fetch_gmail_attachment(
                         return file_bytes, filename, mime
             except Exception as e:
                 log.warning("fetch_gmail_attachment error for %s: %s", _email, e)
+
+    # Fallback: no binary attachment found — render the first matching email's
+    # HTML (or plain text) body into a PDF so parse_receipt still gets a file.
+    if first_body_message is not None:
+        try:
+            payload = first_body_message.get("payload", {})
+            hdr = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+            subject = hdr.get("subject", "(no subject)")
+            sender = hdr.get("from", "")
+            date_hdr = hdr.get("date", "")
+            html = _extract_html_body(payload)
+            if html:
+                pdf_bytes = _render_email_to_pdf(subject, sender, date_hdr, html, is_html=True)
+            else:
+                text_body = _extract_text_body(payload, max_chars=20000)
+                if not text_body.strip():
+                    return None
+                pdf_bytes = _render_email_to_pdf(subject, sender, date_hdr, text_body, is_html=False)
+            filename = f"email-{subject[:40].replace('/', '_') or 'receipt'}.pdf"
+            return pdf_bytes, filename, "application/pdf"
+        except Exception as e:
+            log.warning("fetch_gmail_attachment HTML->PDF fallback failed: %s", e)
 
     return None
 
