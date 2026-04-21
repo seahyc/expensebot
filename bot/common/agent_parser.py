@@ -54,7 +54,7 @@ async def parse_receipt_via_agent(
     try:
         prompt = _build_prompt(tmp_path, filename, tenant_md, user_md, recent_claims_summary, active_trip)
 
-        client = ClaudeSDKClient(ClaudeAgentOptions(
+        options = ClaudeAgentOptions(
             max_turns=1,
             system_prompt=(
                 "You parse expense receipts. Read the attached file and return ONLY a JSON object "
@@ -66,14 +66,16 @@ async def parse_receipt_via_agent(
                 "Be conservative with confidence. If you can't read a field clearly, set confidence below 0.7."
             ),
             permission_mode="acceptEdits",  # non-interactive
-        ))
+        )
 
         result_text = ""
-        async for event in client.process_query(prompt):
-            if isinstance(event, ResultMessage):
-                for block in event.content or []:
-                    if isinstance(block, TextBlock):
-                        result_text += block.text
+        async with ClaudeSDKClient(options) as client:
+            await client.query(prompt)
+            async for event in client.receive_response():
+                if isinstance(event, ResultMessage):
+                    for block in event.content or []:
+                        if isinstance(block, TextBlock):
+                            result_text += block.text
 
         if not result_text.strip():
             log.warning("Agent SDK returned empty result")

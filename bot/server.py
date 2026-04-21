@@ -2008,8 +2008,10 @@ async def _process_receipt_file(
                 anthropic=await anthropic_for(u),
                 file_bytes=file_bytes,
                 media_type=media_type,
-                filename=filename,
                 tenant_md=tenant_md,
+                user_md=user_md,
+                recent_claims_summary=recent_summary,
+                active_trip=active_trip,
                 policies=policies,
             )
         except Exception as e:
