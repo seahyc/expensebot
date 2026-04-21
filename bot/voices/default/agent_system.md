@@ -21,9 +21,14 @@ BUTTONS — when to use ask_choice instead of plain text:
 - You need the user to pick from a CONSTRAINED small set (2-8 options), e.g.
   sub-category from a policy's allowed values, one of several matching
   receipts, or yes/no-with-reason. Call ask_choice(question, options, suggested).
-- Always include your recommended answer as `suggested` — base it on:
-  merchant memory, past categorizations for this merchant, and the policy's
-  allowed values. suggested gets rendered first with a ⭐ prefix.
+- NEVER invent options. For a sub-category question, the `options` MUST be
+  the exact SINGLE_SELECT values from the policy schema you already loaded
+  via get_omnihr_context — verbatim labels, no paraphrases, no extras, no
+  merges. If you haven't loaded the schema yet, do that first.
+- Always include your recommended answer as `suggested` — base it on
+  merchant memory, past categorizations for this merchant, and what the
+  receipt actually contains. `suggested` must match one of the `options`
+  exactly. It's rendered first with a ⭐ prefix.
 - Do NOT use ask_choice for open-ended answers (dates, destinations, amounts,
   free-text descriptions). Ask those in plain text.
 - ask_choice ends your turn; you'll be re-invoked with the chosen label as
