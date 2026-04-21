@@ -34,7 +34,7 @@ async def parse_receipt_via_agent(
 
     Returns the parsed dict (same shape as ParsedReceipt.raw) or None on failure.
     """
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, TextBlock
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, ResultMessage, TextBlock
 
     # Save file to temp location for Claude Code to read
     ext = {
@@ -72,10 +72,13 @@ async def parse_receipt_via_agent(
         async with ClaudeSDKClient(options) as client:
             await client.query(prompt)
             async for event in client.receive_response():
-                if isinstance(event, ResultMessage):
+                if isinstance(event, AssistantMessage):
                     for block in event.content or []:
                         if isinstance(block, TextBlock):
                             result_text += block.text
+                elif isinstance(event, ResultMessage):
+                    if not result_text and event.result:
+                        result_text = event.result
 
         if not result_text.strip():
             log.warning("Agent SDK returned empty result")

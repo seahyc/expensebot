@@ -2023,7 +2023,13 @@ async def _process_receipt_file(
         return
 
     # Dupe check
-    dupes = match_dupes(u["id"], parsed)
+    try:
+        async with client_for(u) as _dupe_client:
+            _recent = await _dupe_client.list_submissions(page_size=90)
+        dupes = match_dupes(parsed, _recent.get("results", []))
+    except Exception as _de:
+        log.warning("dupe check failed in _process_receipt_file: %s", _de)
+        dupes = []
     dupe_warning = format_dupe_warning(dupes) if dupes else None
 
     # Triangulation
@@ -2177,17 +2183,24 @@ async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "parse"):
         return
 
-    await _process_receipt_file(
-        bot=ctx.bot,
-        chat_id=msg.chat_id,
-        u=u,
-        file_bytes=file_bytes,
-        media_type=media_type,
-        filename=filename,
-        tg_file_id=tg_file_id,
-        tg_file_type=tg_file_type,
-        user_note=user_note,
-    )
+    try:
+        await _process_receipt_file(
+            bot=ctx.bot,
+            chat_id=msg.chat_id,
+            u=u,
+            file_bytes=file_bytes,
+            media_type=media_type,
+            filename=filename,
+            tg_file_id=tg_file_id,
+            tg_file_type=tg_file_type,
+            user_note=user_note,
+        )
+    except Exception as e:
+        log.exception("_process_receipt_file crashed for user=%s", u["id"])
+        try:
+            await msg.reply_text(f"Something broke while processing that receipt: {e}")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
