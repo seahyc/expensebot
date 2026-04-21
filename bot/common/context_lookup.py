@@ -156,21 +156,71 @@ def _fmt_date_for_gmail(dt: datetime) -> str:
     return dt.strftime("%Y/%m/%d")
 
 
-def _extract_text_body(payload: dict, max_chars: int = 500) -> str:
-    """Recursively extract plain-text body from a Gmail message payload."""
+def _html_to_text(html: str) -> str:
+    """Strip an HTML email body into readable plaintext.
+
+    Best-effort: drops <script>/<style>, converts <br>/<p>/<tr>/<li> to newlines,
+    removes remaining tags, decodes entities, collapses whitespace. Good enough
+    for Claude to read the actual line items from HTML-only e-receipts (Grab,
+    Challenger, Ryde) without pulling in a full HTML parser.
+    """
+    import html as _html_mod
+    import re
+    # Drop script/style blocks entirely
+    html = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    # Block-level tags → newlines so rows/list items stay on separate lines
+    html = re.sub(r"</(p|div|tr|li|h[1-6]|section|article|header|footer)\s*>", "\n", html, flags=re.IGNORECASE)
+    html = re.sub(r"<(br|hr)\s*/?>", "\n", html, flags=re.IGNORECASE)
+    # Strip remaining tags
+    html = re.sub(r"<[^>]+>", " ", html)
+    # Decode entities
+    text = _html_mod.unescape(html)
+    # Collapse whitespace per line, drop empty lines, cap consecutive blanks
+    lines = [re.sub(r"[ \t ]+", " ", ln).strip() for ln in text.splitlines()]
+    out: list[str] = []
+    blank = False
+    for ln in lines:
+        if ln:
+            out.append(ln)
+            blank = False
+        elif not blank:
+            out.append("")
+            blank = True
+    return "\n".join(out).strip()
+
+
+def _walk_body(payload: dict, want_html: bool) -> str:
+    """Walk a Gmail payload tree and return the first text/plain (or text/html) body found."""
     import base64
     mime = payload.get("mimeType", "")
-    if mime == "text/plain":
+    target = "text/html" if want_html else "text/plain"
+    if mime == target:
         data = payload.get("body", {}).get("data", "")
         if data:
             try:
-                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")[:max_chars]
+                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
             except Exception:
-                pass
+                return ""
     for part in payload.get("parts", []):
-        text = _extract_text_body(part, max_chars)
-        if text:
-            return text
+        found = _walk_body(part, want_html)
+        if found:
+            return found
+    return ""
+
+
+def _extract_text_body(payload: dict, max_chars: int = 500) -> str:
+    """Return a readable body from a Gmail payload.
+
+    Prefers text/plain. Falls back to text/html (stripped to plaintext) when no
+    plain-text part exists — so HTML-only e-receipts still surface their
+    amount, merchant, and line items to the agent.
+    """
+    plain = _walk_body(payload, want_html=False)
+    if plain:
+        return plain[:max_chars]
+    html = _walk_body(payload, want_html=True)
+    if html:
+        return _html_to_text(html)[:max_chars]
     return ""
 
 
@@ -262,7 +312,7 @@ async def gmail_context(
 
                     # Extract body and attachments
                     payload = msg.get("payload", {})
-                    body = _extract_text_body(payload, max_chars=400).strip()
+                    body = _extract_text_body(payload, max_chars=1500).strip()
                     attachments = _extract_attachments(payload)
 
                     parts = [f"From: {sender}", f"Subject: {subject}", f"Date: {date}"]
