@@ -1998,6 +1998,20 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
+    # If there's an open ask_choice prompt and the user's text matches one of the options
+    # (exact or case-insensitive substring), treat it as a button tap. This makes the UX
+    # consistent across native Telegram (where tapping works) and clients that don't render
+    # Telegram inline keyboards (Beeper/Matrix bridges).
+    _open_choices = _pending_choices.get(msg.chat_id)
+    if _open_choices:
+        low = text.lower().strip()
+        chosen = next((c for c in _open_choices if c.lower() == low), None) or \
+                 next((c for c in _open_choices if low in c.lower() or c.lower() in low), None)
+        if chosen:
+            _pending_choices.pop(msg.chat_id, None)
+            await _run_agent_turn_for_text(u=u, chat_id=msg.chat_id, text=chosen, bot=ctx.bot)
+            return
+
     storage.log_message(u["id"], "in", text)
 
     # Detect OAuth token pasted in Telegram (code#state or ?code=XXX format)
