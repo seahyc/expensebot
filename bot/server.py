@@ -1697,6 +1697,91 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             )
             return f"Fetched '{att_filename}' from your Gmail — sending it now for review. Use the buttons to file or skip."
 
+        elif tool_name == "confirm_pending_receipt":
+            if chat_id is None:
+                return "confirm_pending_receipt: no chat_id in scope."
+            pending = _pending_files.get(chat_id)
+            if not pending:
+                return "No pending receipt — ask the user to resend the file."
+            parsed = pending.parsed
+            if not parsed.amount or not parsed.receipt_date:
+                return (
+                    f"Can't file — missing parsed amount or date. "
+                    f"Parsed so far: merchant={parsed.merchant} amount={parsed.amount} "
+                    f"currency={parsed.currency} date={parsed.receipt_date}"
+                )
+            policy_id = int(tool_input.get("policy_id") or parsed.suggested_policy_id or 0)
+            if not policy_id:
+                return "Can't file — no policy on the parsed receipt. Ask the user which policy."
+            merchant_ov = tool_input.get("merchant") or parsed.merchant or ""
+            amount_ov = tool_input.get("amount") or parsed.amount
+            desc_ov = tool_input.get("description") or parsed.description_draft or pending.user_note or merchant_ov
+            sub_ov = tool_input.get("sub_category") or parsed.suggested_sub_category_label
+            dest_ov = tool_input.get("destination")
+            ts_ov = tool_input.get("trip_start")
+            te_ov = tool_input.get("trip_end")
+            try:
+                async with client_for(u) as client:
+                    try:
+                        doc = await client.upload_document(
+                            file_bytes=pending.file_bytes,
+                            name=pending.filename,
+                            media_type=pending.media_type if pending.media_type.startswith("application/") else "image/jpeg",
+                        )
+                    except Exception as e:
+                        return f"Upload failed: {e}"
+                    schema = await client.schema(policy_id, parsed.receipt_date)
+                    values: dict[str, Any] = {
+                        "AMOUNT": {"amount": str(amount_ov), "amount_currency": parsed.currency or "SGD"},
+                        "MERCHANT": merchant_ov,
+                        "RECEIPT_DATE": parsed.receipt_date.isoformat(),
+                        "DESCRIPTION": desc_ov,
+                    }
+                    for lbl, val in (parsed.custom_fields or {}).items():
+                        values[lbl] = val
+                    for f in schema.custom_fields():
+                        label_low = f.label.lower()
+                        if f.field_type == "SINGLE_SELECT" and "sub" in label_low and sub_ov:
+                            values[f.label] = sub_ov
+                        elif "destination" in label_low and (dest_ov or f.is_mandatory):
+                            values[f.label] = dest_ov or "Singapore"
+                        elif "trip start" in label_low and (ts_ov or f.is_mandatory):
+                            values[f.label] = ts_ov or parsed.receipt_date.isoformat()
+                        elif "trip end" in label_low and (te_ov or f.is_mandatory):
+                            values[f.label] = te_ov or parsed.receipt_date.isoformat()
+                    draft = await client.create_draft(
+                        policy_id=policy_id,
+                        schema=schema,
+                        values=values,
+                        receipts=[{"id": doc["id"], "file_path": doc["file_path"]}],
+                    )
+                sub_id = draft["id"]
+                storage.insert_receipt(
+                    u["id"],
+                    file_sha256=pending.sha,
+                    parsed=parsed.raw,
+                    omnihr_doc_id=doc["id"],
+                    omnihr_submission_id=sub_id,
+                    omnihr_file_path=doc["file_path"],
+                    omnihr_file_name=pending.filename,
+                    omnihr_file_mime=pending.media_type,
+                    tg_file_id=pending.tg_file_id,
+                    tg_file_type=pending.tg_file_type,
+                    status=draft.get("status", 3),
+                )
+                _pending_files.pop(chat_id, None)
+                return (
+                    f"Draft filed ✅ #{sub_id}\n"
+                    f"{merchant_ov} · {parsed.currency or 'SGD'} {amount_ov} · {parsed.receipt_date}\n"
+                    f"Sub-category: {sub_ov or '?'}"
+                )
+            except SchemaDriftError as e:
+                return f"Schema drift on draft create: {e} | fields={getattr(e, 'field_errors', None)}"
+            except ValidationError as e:
+                return f"Validation error: {e} | fields={getattr(e, 'field_errors', None)}"
+            except Exception as e:
+                return f"confirm_pending_receipt failed: {e}"
+
         elif tool_name == "file_expense":
             from datetime import date as _date
             merchant = tool_input.get("merchant", "")
@@ -1860,6 +1945,21 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     executor = await _build_tool_executor(u, bot=ctx.bot, chat_id=msg.chat_id)
     history = storage.get_recent_messages(u["id"], limit=12)
 
+    pending_receipt_md: str | None = None
+    _pf = _pending_files.get(msg.chat_id)
+    if _pf:
+        _p = _pf.parsed
+        pol = next((p.label for p in _pf.policies if p.id == _p.suggested_policy_id), f"#{_p.suggested_policy_id}") if _p.suggested_policy_id else "?"
+        pending_receipt_md = (
+            f"- merchant: {_p.merchant}\n"
+            f"- amount: {_p.currency or 'SGD'} {_p.amount}\n"
+            f"- date: {_p.receipt_date}\n"
+            f"- suggested policy: {pol}\n"
+            f"- suggested sub-category: {_p.suggested_sub_category_label or '(none)'}\n"
+            f"- description draft: {_p.description_draft or '(none)'}\n"
+            f"- file: {_pf.filename}"
+        )
+
     _stop_typing = asyncio.Event()
     _typing_task = asyncio.create_task(_keep_typing(ctx.bot, msg.chat_id, _stop_typing))
 
@@ -1874,6 +1974,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             tool_executor=executor,
             conversation_history=history,
             user=u,
+            pending_receipt_md=pending_receipt_md,
         )
     except Exception as e:
         log.warning("agent failed: %s", e)

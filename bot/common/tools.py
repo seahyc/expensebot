@@ -355,6 +355,32 @@ TOOLS = [
         },
     },
     {
+        "name": "confirm_pending_receipt",
+        "description": (
+            "File the receipt that was just parsed and is sitting in 'Pending receipt' "
+            "context, waiting for user confirmation. Call this when the user confirms in "
+            "text (e.g. 'yes', 'file it', 'go ahead', 'sure do that') OR corrects a single "
+            "field (merchant, amount, sub-category, description, destination, trip dates). "
+            "For a simple yes, pass no overrides. For corrections, pass only the fields that "
+            "change. The stored parsed values fill in everything else. Uploads the original "
+            "receipt file and creates an OmniHR draft with the attachment."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "policy_id": {"type": "integer", "description": "Override the suggested policy ID if the user picked a different policy"},
+                "sub_category": {"type": "string", "description": "Override the sub-category label"},
+                "description": {"type": "string", "description": "Override the description"},
+                "merchant": {"type": "string", "description": "Override the merchant name"},
+                "amount": {"type": "number", "description": "Override the amount"},
+                "destination": {"type": "string", "description": "Business Trip Destination override (Travel policies)"},
+                "trip_start": {"type": "string", "description": "Business Trip Start date override (YYYY-MM-DD)"},
+                "trip_end": {"type": "string", "description": "Business Trip End date override (YYYY-MM-DD)"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "file_expense",
         "description": (
             "Create an OmniHR expense draft from structured data — for policies that allow "

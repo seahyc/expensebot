@@ -136,6 +136,7 @@ def build_context_text(
     has_file: bool,
     user_message: str,
     triangulation_md: str | None = None,
+    pending_receipt_md: str | None = None,
 ) -> str:
     about_block = (
         f"## About you\n{profile_md}\n\n"
@@ -153,6 +154,14 @@ def build_context_text(
         if triangulation_md
         else ""
     )
+    pending_block = (
+        f"## Pending receipt (parsed, awaiting user confirmation)\n{pending_receipt_md}\n\n"
+        f"→ If the user now confirms (yes / file it / go ahead / sure), call "
+        f"`confirm_pending_receipt` to file it. If they're correcting a field "
+        f"(merchant, amount, sub-category, destination…), call `confirm_pending_receipt` "
+        f"with the overrides.\n\n"
+        if pending_receipt_md else ""
+    )
     integrations_block = build_integrations_block(user) if user else ""
     return (
         f"## Now\n{_now_sgt()}\n\n"
@@ -162,6 +171,7 @@ def build_context_text(
         f"## Your rules (learned from past corrections)\n"
         f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
         f"{triangulation_block}"
+        f"{pending_block}"
         f"{'[User sent a receipt photo/PDF — call parse_receipt first, then get_omnihr_context]' if has_file else ''}\n"
         f"## User message\n{user_message}"
     )
@@ -179,6 +189,7 @@ async def run_agent(
     conversation_history: list[dict] | None = None,  # [{direction, body}] oldest first
     user: dict[str, Any] | None = None,
     system_prompt: str | None = None,
+    pending_receipt_md: str | None = None,
 ) -> str:
     """Run the agent loop. Returns the final text response for the user.
 
@@ -213,6 +224,7 @@ async def run_agent(
                     boss_profile_md=boss_profile_md,
                     has_file=has_file,
                     user_message=user_message,
+                    pending_receipt_md=pending_receipt_md,
                 ),
                 "cache_control": {"type": "ephemeral"},
             },
