@@ -190,8 +190,13 @@ async def run_agent(
     user: dict[str, Any] | None = None,
     system_prompt: str | None = None,
     pending_receipt_md: str | None = None,
-) -> str:
-    """Run the agent loop. Returns the final text response for the user.
+) -> tuple[str, str | None]:
+    """Run the agent loop. Returns (final_text, tool_turns_json).
+
+    tool_turns_json is a JSON-serialized list of the intermediate assistant
+    (text+tool_use) and user (tool_result) blocks, so the next turn can replay
+    them as history and the LLM has the tool-sourced facts available without
+    re-calling tools. None if the turn involved no tool calls.
 
     tool_executor is called for each tool_use Claude requests.
     It should return a string result (JSON or plain text).
@@ -201,16 +206,29 @@ async def run_agent(
         final_system_prompt = final_system_prompt + "\n\n" + _PLUGIN_SKILLS
 
     # Build conversation history as prior turns (excluding the current message,
-    # which is already in conversation_history as the last 'in' entry)
+    # which is already in conversation_history as the last 'in' entry).
+    # For 'out' entries with tool_turns, replay the full tool_use/tool_result
+    # blocks so the LLM can see facts it retrieved via tools in prior turns.
     history_messages: list[dict] = []
     if conversation_history:
         # Drop the last entry — it's the current message we're about to send
         prior = conversation_history[:-1] if conversation_history else []
         for entry in prior:
-            role = "user" if entry["direction"] == "in" else "assistant"
-            body = (entry["body"] or "")[:800]
-            if body:
-                history_messages.append({"role": role, "content": body})
+            direction = entry["direction"]
+            body = (entry.get("body") or "")
+            tool_turns_raw = entry.get("tool_turns") if direction == "out" else None
+            if direction == "out" and tool_turns_raw:
+                try:
+                    replayed = json.loads(tool_turns_raw)
+                    if isinstance(replayed, list):
+                        history_messages.extend(replayed)
+                except Exception as e:
+                    log.warning("failed to decode tool_turns for replay: %s", e)
+            # Final assistant text (end_turn reply) / user text body — truncated
+            body_trimmed = body[:800]
+            if body_trimmed:
+                role = "user" if direction == "in" else "assistant"
+                history_messages.append({"role": role, "content": body_trimmed})
 
     context_block = {
         "role": "user",
@@ -232,23 +250,38 @@ async def run_agent(
     }
 
     # Anthropic requires strictly alternating roles. Merge consecutive same-role
-    # history entries, then append the context block (always user role).
+    # history entries by concatenating their content (promoting to list-of-blocks
+    # form when either side is a list, e.g. replayed tool_use/tool_result blocks).
+    def _as_blocks(content) -> list[dict]:
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        return list(content)
+
     merged: list[dict] = []
     for m in history_messages:
         if merged and merged[-1]["role"] == m["role"]:
-            merged[-1]["content"] += "\n" + m["content"]
+            prev, curr = merged[-1]["content"], m["content"]
+            if isinstance(prev, str) and isinstance(curr, str):
+                merged[-1]["content"] = prev + "\n" + curr
+            else:
+                merged[-1]["content"] = _as_blocks(prev) + _as_blocks(curr)
         else:
             merged.append({"role": m["role"], "content": m["content"]})
 
     # If history ends on a user turn, merge context into it to avoid two consecutive user msgs.
     if merged and merged[-1]["role"] == "user":
-        # Append current message text to the last user turn's content
-        last_text = merged[-1]["content"]
+        last_content = merged[-1]["content"]
         context_text = context_block["content"][0]["text"]
-        merged[-1] = {
-            "role": "user",
-            "content": [{"type": "text", "text": last_text + "\n\n---\n\n" + context_text, "cache_control": {"type": "ephemeral"}}],
-        }
+        if isinstance(last_content, str):
+            merged[-1] = {
+                "role": "user",
+                "content": [{"type": "text", "text": last_content + "\n\n---\n\n" + context_text, "cache_control": {"type": "ephemeral"}}],
+            }
+        else:
+            merged[-1] = {
+                "role": "user",
+                "content": _as_blocks(last_content) + [{"type": "text", "text": context_text, "cache_control": {"type": "ephemeral"}}],
+            }
         messages = merged
     elif merged:
         messages = merged + [context_block]
@@ -256,6 +289,20 @@ async def run_agent(
         messages = [context_block]
 
     user_id = (user or {}).get("id", "?")
+
+    # Captures the intermediate assistant(tool_use) / user(tool_result) turns
+    # produced during this run so callers can persist them and replay in future
+    # turns. Excludes the final end_turn assistant reply (that's the returned text).
+    captured_turns: list[dict] = []
+
+    def _block_to_dict(b) -> dict:
+        t = getattr(b, "type", None)
+        if t == "text":
+            return {"type": "text", "text": b.text}
+        if t == "tool_use":
+            return {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
+        # Unknown block — best-effort
+        return {"type": t or "unknown", "raw": str(b)[:500]}
 
     # Agent loop — max 3 turns (tool calls)
     for turn in range(4):
@@ -282,8 +329,8 @@ async def run_agent(
                     "(Claude subscription), your plan's per-hour quota is shared "
                     "with Claude Code. Wait a minute or paste an API key with "
                     "/setkey sk-ant-… to avoid the subscription limits."
-                )
-            return f"Sorry, I hit an error: {e}"
+                ), None
+            return f"Sorry, I hit an error: {e}", None
 
         # Telemetry: log what we got back
         _log_llm_output(user_id, turn, resp)
@@ -298,11 +345,17 @@ async def run_agent(
                 tool_calls.append(block)
 
         if resp.stop_reason == "end_turn" or not tool_calls:
-            # Done — return accumulated text
-            return "\n".join(text_parts) or "Done."
+            # Done — return accumulated text + captured tool turns (if any)
+            final_text = "\n".join(text_parts) or "Done."
+            tool_turns_json = json.dumps(captured_turns) if captured_turns else None
+            return final_text, tool_turns_json
 
         # Execute tool calls and build tool_result messages
         messages.append({"role": "assistant", "content": resp.content})
+        captured_turns.append({
+            "role": "assistant",
+            "content": [_block_to_dict(b) for b in resp.content],
+        })
 
         tool_results = []
         for tc in tool_calls:
@@ -319,5 +372,8 @@ async def run_agent(
             })
 
         messages.append({"role": "user", "content": tool_results})
+        captured_turns.append({"role": "user", "content": tool_results})
 
-    return "\n".join(text_parts) if text_parts else "I got stuck in a loop. Try again?"
+    final_text = "\n".join(text_parts) if text_parts else "I got stuck in a loop. Try again?"
+    tool_turns_json = json.dumps(captured_turns) if captured_turns else None
+    return final_text, tool_turns_json

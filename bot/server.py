@@ -1952,8 +1952,9 @@ async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot) -> 
             f"- suggested sub-category: {_p.suggested_sub_category_label or '(none)'}\n"
             f"- description draft: {_p.description_draft or '(none)'}\n- file: {_pf.filename}"
         )
+    tool_turns_json: str | None = None
     try:
-        reply = await run_agent(
+        reply, tool_turns_json = await run_agent(
             anthropic=anth,
             user_message=text,
             has_file=False,
@@ -1968,7 +1969,7 @@ async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot) -> 
     except Exception as e:
         log.warning("agent failed in choice callback: %s", e)
         reply = f"Something went wrong: {e}"
-    storage.log_message(u["id"], "out", reply)
+    storage.log_message(u["id"], "out", reply, tool_turns=tool_turns_json)
     try:
         await bot.send_message(chat_id=chat_id, text=reply, parse_mode="Markdown")
     except Exception:
@@ -2085,8 +2086,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _stop_typing = asyncio.Event()
     _typing_task = asyncio.create_task(_keep_typing(ctx.bot, msg.chat_id, _stop_typing))
 
+    tool_turns_json: str | None = None
     try:
-        reply = await run_agent(
+        reply, tool_turns_json = await run_agent(
             anthropic=anth,
             user_message=text,
             has_file=False,
@@ -2105,7 +2107,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _stop_typing.set()
         _typing_task.cancel()
 
-    storage.log_message(u["id"], "out", reply)
+    storage.log_message(u["id"], "out", reply, tool_turns=tool_turns_json)
     asyncio.create_task(learning.maybe_trigger_review(
         user_id=u["id"], db=storage, anthropic_client=anth,
         recent_messages=history, trigger="turn",

@@ -168,6 +168,7 @@ _ADD_COLS = [
     ("users", "whatsapp_phone", "TEXT"),       # E.164 for display
     ("users", "whatsapp_connected", "INTEGER DEFAULT 0"),
     ("users", "ext_session", "TEXT"),          # UUID token for extension status API
+    ("messages", "tool_turns", "TEXT"),        # JSON: intermediate tool_use/tool_result blocks for this turn
 ]
 
 
@@ -808,13 +809,16 @@ def log_message(
     *,
     has_file: bool = False,
     file_type: str | None = None,
+    tool_turns: str | None = None,
 ) -> None:
-    """Persist every inbound/outbound message for debugging. direction: 'in'|'out'."""
+    """Persist every inbound/outbound message for debugging. direction: 'in'|'out'.
+    tool_turns (out only): JSON string of intermediate tool_use/tool_result blocks
+    produced during this agent turn, so they can be replayed in future history."""
     with db() as conn:
         conn.execute(
-            "INSERT INTO messages (user_id, direction, body, has_file, file_type) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (user_id, direction, body, int(has_file), file_type),
+            "INSERT INTO messages (user_id, direction, body, has_file, file_type, tool_turns) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, direction, body, int(has_file), file_type, tool_turns),
         )
 
 
@@ -822,12 +826,15 @@ def get_recent_messages(user_id: int, limit: int = 10) -> list[dict]:
     """Return the last `limit` text messages for user, oldest first, for conversation history."""
     with db() as conn:
         rows = conn.execute(
-            "SELECT direction, body FROM messages "
+            "SELECT direction, body, tool_turns FROM messages "
             "WHERE user_id=? AND body IS NOT NULL AND body != '' "
             "ORDER BY created_at DESC LIMIT ?",
             (user_id, limit),
         ).fetchall()
-    return [{"direction": r["direction"], "body": r["body"]} for r in reversed(rows)]
+    return [
+        {"direction": r["direction"], "body": r["body"], "tool_turns": r["tool_turns"]}
+        for r in reversed(rows)
+    ]
 
 
 def count_nudges_since(user_id: int, since: datetime, *, hook: str | None = None) -> int:

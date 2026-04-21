@@ -175,6 +175,7 @@ class HeartbeatRunner:
                         hook=f"heartbeat_{task_id}",
                         message_preview=response[:100],
                     )
+                    storage.log_message(user["id"], "out", response)
                     log.info("Heartbeat message sent: user=%s task=%s", user["id"], task_id)
                 except Exception:
                     log.exception("Failed to send heartbeat message for user=%s task=%s", user["id"], task_id)
