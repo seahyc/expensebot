@@ -1748,7 +1748,11 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     f"No receipt attached — add one on OmniHR if required."
                 )
             except Exception as e:
-                return f"file_expense failed: {e}"
+                detail = str(e)
+                field_errors = getattr(e, "field_errors", None)
+                if field_errors:
+                    detail += f" | field_errors={field_errors}"
+                return f"file_expense failed: {detail}"
 
         return f"Unknown tool: {tool_name}"
 
