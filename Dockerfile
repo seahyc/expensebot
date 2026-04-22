@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -U pip && \
       httpx>=0.27 anthropic>=0.40 fastapi>=0.115 "uvicorn[standard]>=0.32" \
       asyncpg>=0.29 redis>=5.0 pydantic>=2.9 python-telegram-bot>=21.6 \
       weasyprint>=63 boto3>=1.35 stripe>=10 pynacl>=1.5 structlog>=24 \
-      claude-agent-sdk>=0.1 apscheduler>=3.10 telethon>=1.36
+      claude-agent-sdk>=0.1 apscheduler>=3.10 telethon>=1.36 pymupdf>=1.24
 
 COPY omnihr_client ./omnihr_client
 COPY bot ./bot

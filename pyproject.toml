@@ -22,6 +22,7 @@ dependencies = [
   "apscheduler>=3.10",
   "pyyaml>=6",
   "telethon>=1.36",
+  "pymupdf>=1.24",
 ]
 
 [project.optional-dependencies]

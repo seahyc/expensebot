@@ -443,15 +443,19 @@ TOOLS = [
     {
         "name": "send_to_user",
         "description": (
-            "Send a file to the user's Telegram chat. Use when the user asks to see a receipt, "
-            "preview a document, or wants the actual file (not just a link). Sources:\n"
+            "Send a receipt/document to the user's Telegram chat. Use when the user asks to see, "
+            "preview, or receive a file. Sources:\n"
             "- `submission_id`: fetch the raw receipt attached to an OmniHR claim.\n"
             "- `gmail_query`: fetch from Gmail — prefers the attachment; if the email has no "
             "binary attachment (HTML e-receipts like Grab, Ryde, Challenger), renders the body to PDF.\n"
             "- `url`: render any webpage to PDF via WeasyPrint.\n"
-            "Exactly one source must be provided. Optional `caption` goes with the file.\n"
-            "If the channel doesn't support file delivery (e.g. WhatsApp/Lark today), you'll "
-            "get back an error — relay it to the user with the preview URL instead."
+            "Exactly one source must be provided.\n\n"
+            "BY DEFAULT: if the resulting file is a PDF, it's rasterized to PNG page previews so the "
+            "user can see it inline in Telegram (no tap-to-download). Set `as_pdf: true` ONLY when the "
+            "user explicitly asks for the actual PDF file (e.g. \"send me the pdf\", \"I need the raw "
+            "file\", \"I want to download it\").\n\n"
+            "If the channel doesn't support file delivery (e.g. WhatsApp/Lark today), you'll get an "
+            "error back — relay it to the user with the preview URL instead."
         ),
         "input_schema": {
             "type": "object",
@@ -472,6 +476,11 @@ TOOLS = [
                 "caption": {
                     "type": "string",
                     "description": "Optional caption accompanying the file.",
+                },
+                "as_pdf": {
+                    "type": "boolean",
+                    "description": "Send the raw PDF instead of PNG page previews. Default false — "
+                                   "only set true if the user explicitly asked for the PDF file.",
                 },
             },
             "required": [],

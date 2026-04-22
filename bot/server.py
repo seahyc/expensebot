@@ -760,6 +760,54 @@ async def _resolve_doc_ids(
     return resolved
 
 
+def _sniff_mime(data: bytes) -> str | None:
+    """Guess mime type from file magic bytes — S3 often serves octet-stream."""
+    if not data:
+        return None
+    if data[:4] == b"%PDF":
+        return "application/pdf"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"PK":
+        return "application/zip"
+    return None
+
+
+def _ext_for_mime(mime: str) -> str:
+    return {
+        "application/pdf": "pdf",
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/gif": "gif",
+        "image/webp": "webp",
+        "application/zip": "zip",
+    }.get(mime, "")
+
+
+def _pdf_to_preview_images(pdf_bytes: bytes, max_pages: int = 3) -> list[bytes]:
+    """Rasterize the first `max_pages` of a PDF to PNG bytes for in-chat preview."""
+    try:
+        import pymupdf  # type: ignore
+    except ImportError:
+        import fitz as pymupdf  # type: ignore
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    out: list[bytes] = []
+    try:
+        for i in range(min(max_pages, doc.page_count)):
+            page = doc.load_page(i)
+            pix = page.get_pixmap(dpi=150)
+            out.append(pix.tobytes("png"))
+    finally:
+        doc.close()
+    return out
+
+
 async def _do_list(
     update: Update,
     u: dict,
@@ -1787,6 +1835,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             gmail_q = tool_input.get("gmail_query")
             url = tool_input.get("url")
             caption = (tool_input.get("caption") or "")[:1024]
+            as_pdf = bool(tool_input.get("as_pdf") or False)
             provided = [bool(sub_id), bool(gmail_q), bool(url)]
             if sum(provided) != 1:
                 return "send_to_user requires exactly one of: submission_id, gmail_query, url."
@@ -1806,7 +1855,7 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                         return f"Claim #{sub_id} has no attached documents on OmniHR."
                     doc = docs[0]
                     file_path = doc.get("file_path")
-                    filename = doc.get("name") or f"claim-{sub_id}"
+                    filename = doc.get("name") or doc.get("original_name") or ""
                     if not file_path:
                         return f"Claim #{sub_id}: no downloadable file_path found on document."
                     async with httpx.AsyncClient(timeout=30.0) as hc:
@@ -1814,6 +1863,18 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                         r.raise_for_status()
                         file_bytes = r.content
                         mime = r.headers.get("content-type", mime).split(";")[0].strip()
+                    # S3 often serves application/octet-stream. Sniff content to
+                    # recover the real mime + extension so Telegram doesn't name it .bin.
+                    sniffed = _sniff_mime(file_bytes)
+                    if sniffed and (not mime or mime == "application/octet-stream"):
+                        mime = sniffed
+                    if not filename:
+                        ext = _ext_for_mime(mime) or "bin"
+                        filename = f"claim-{sub_id}.{ext}"
+                    elif "." not in filename:
+                        ext = _ext_for_mime(mime)
+                        if ext:
+                            filename = f"{filename}.{ext}"
 
                 elif gmail_q:
                     from .common.context_lookup import fetch_gmail_attachment
@@ -1849,14 +1910,34 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             if not file_bytes:
                 return "send_to_user: produced empty file."
 
-            buf = io.BytesIO(file_bytes)
-            buf.name = filename
+            # Default: render PDFs to PNG pages so they preview inline in Telegram.
+            # Only send the raw PDF if the user explicitly asked (as_pdf=True).
             try:
-                if mime.startswith("image/"):
+                if mime == "application/pdf" and not as_pdf:
+                    pages = _pdf_to_preview_images(file_bytes, max_pages=3)
+                    if not pages:
+                        # Fall back to the raw PDF if rasterize produced nothing.
+                        buf = io.BytesIO(file_bytes); buf.name = filename
+                        await bot.send_document(chat_id=chat_id, document=buf, filename=filename, caption=caption or None)
+                        return f"Sent '{filename}' ({len(file_bytes)} bytes) as PDF (rasterize failed)."
+                    for idx, png in enumerate(pages):
+                        pbuf = io.BytesIO(png)
+                        pbuf.name = f"{filename.rsplit('.', 1)[0]}-p{idx+1}.png"
+                        cap = caption if idx == 0 else None
+                        await bot.send_photo(chat_id=chat_id, photo=pbuf, caption=cap)
+                    extra = f" (page 1/{len(pages)} shown" if len(pages) == 3 else ""
+                    return (
+                        f"Sent {len(pages)} preview image(s) from '{filename}'. "
+                        "Ask and I'll send the raw PDF instead."
+                    )
+                elif mime.startswith("image/"):
+                    buf = io.BytesIO(file_bytes); buf.name = filename
                     await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption or None)
                 else:
+                    buf = io.BytesIO(file_bytes); buf.name = filename
                     await bot.send_document(chat_id=chat_id, document=buf, filename=filename, caption=caption or None)
             except Exception as e:
+                log.exception("send_to_user: Telegram send failed")
                 return f"send_to_user: Telegram send failed — {e!s}"
             return f"Sent '{filename}' ({len(file_bytes)} bytes) to the user."
 
