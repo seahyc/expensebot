@@ -1409,10 +1409,73 @@ async def _record_merchant_after_submit(client, u: dict, submission_id: int) -> 
             log.exception("record_merchant_choice failed for user=%s", u["id"])
 
 
+_TOOL_CHAT_ACTION = {
+    # Per-tool Telegram chat action — refreshed every 4s while the tool runs so
+    # the user sees a live indicator instead of a stall.
+    "send_to_user": "upload_photo",
+    "parse_receipt": "typing",
+    "file_from_email": "upload_document",
+    "file_expense": "typing",
+    "submit_claim": "typing",
+    "delete_claim": "typing",
+    "list_claims": "typing",
+    "get_claim_summary": "typing",
+    "get_omnihr_context": "typing",
+    "search_email_context": "typing",
+    "search_calendar_context": "typing",
+    "list_recent_emails": "typing",
+    "list_upcoming_events": "typing",
+}
+
+
+@asynccontextmanager
+async def _typing_pulse(bot, chat_id, action: str = "typing"):
+    """Keep a Telegram chat action alive for the duration of a tool call.
+
+    Telegram's action indicator fades after ~5s, so we refresh it every 4s in
+    the background until the tool completes. No-op if bot/chat_id aren't set.
+    """
+    if bot is None or chat_id is None:
+        yield
+        return
+
+    stop = asyncio.Event()
+
+    async def _pulse():
+        try:
+            while not stop.is_set():
+                try:
+                    await bot.send_chat_action(chat_id=chat_id, action=action)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=4.0)
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    task = asyncio.create_task(_pulse())
+    try:
+        yield
+    finally:
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except Exception:
+            pass
+
+
 async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_type: str = "", filename: str = "", *, bot=None, chat_id: int | None = None):
     """Build a tool executor closure for the agent, bound to this user + file."""
 
     async def execute(tool_name: str, tool_input: dict) -> str:
+        action = _TOOL_CHAT_ACTION.get(tool_name, "typing")
+        async with _typing_pulse(bot, chat_id, action=action):
+            return await _execute_inner(tool_name, tool_input)
+
+    async def _execute_inner(tool_name: str, tool_input: dict) -> str:
         if tool_name == "parse_receipt":
             if not file_bytes:
                 return "No receipt file attached. Ask the user to send a photo or PDF."
@@ -1884,23 +1947,28 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     file_bytes, filename, mime = attach
 
                 elif url:
-                    # Render any public URL to PDF via WeasyPrint.
-                    # Fetch HTML ourselves (WeasyPrint's url= doesn't send a browser UA).
-                    async with httpx.AsyncClient(
-                        timeout=20.0, follow_redirects=True,
-                        headers={"User-Agent": "Mozilla/5.0 expensebot/1.0"},
-                    ) as hc:
-                        r = await hc.get(url)
-                        r.raise_for_status()
-                        html_text = r.text
-                    from weasyprint import HTML
-                    file_bytes = HTML(string=html_text, base_url=url).write_pdf()
-                    # Name from last URL segment, else host.
+                    # Headless Chromium screenshot — works for JS-heavy sites where
+                    # WeasyPrint's static layout engine chokes (Glints, Stripe, SPAs).
+                    from playwright.async_api import async_playwright
                     from urllib.parse import urlparse
+                    async with async_playwright() as pw:
+                        browser = await pw.chromium.launch(args=["--no-sandbox"])
+                        try:
+                            ctx = await browser.new_context(viewport={"width": 1280, "height": 900})
+                            page = await ctx.new_page()
+                            try:
+                                await page.goto(url, wait_until="networkidle", timeout=20000)
+                            except Exception:
+                                # networkidle sometimes never fires on sites with pollers —
+                                # fall back to domcontentloaded so we still get something.
+                                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                            file_bytes = await page.screenshot(full_page=True, type="png")
+                        finally:
+                            await browser.close()
                     p = urlparse(url)
                     stem = (p.path.rstrip("/").rsplit("/", 1)[-1] or p.netloc).replace(".", "_") or "page"
-                    filename = f"{stem}.pdf"
-                    mime = "application/pdf"
+                    filename = f"{stem}.png"
+                    mime = "image/png"
             except httpx.HTTPError as e:
                 return f"send_to_user: fetch failed — {e!s}"
             except Exception as e:
@@ -1931,8 +1999,18 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                         "Ask and I'll send the raw PDF instead."
                     )
                 elif mime.startswith("image/"):
+                    # Telegram photo: max 10MB, max aspect ratio ~1:20. Tall full-page
+                    # screenshots often blow past both — fall back to document if send_photo
+                    # rejects it, so the user still gets the file.
                     buf = io.BytesIO(file_bytes); buf.name = filename
-                    await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption or None)
+                    try:
+                        if len(file_bytes) > 10 * 1024 * 1024:
+                            raise RuntimeError("too large for photo (>10MB)")
+                        await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption or None)
+                    except Exception as e:
+                        log.info("send_photo fell back to document: %s", e)
+                        buf.seek(0)
+                        await bot.send_document(chat_id=chat_id, document=buf, filename=filename, caption=caption or None)
                 else:
                     buf = io.BytesIO(file_bytes); buf.name = filename
                     await bot.send_document(chat_id=chat_id, document=buf, filename=filename, caption=caption or None)
