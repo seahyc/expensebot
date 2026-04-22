@@ -724,6 +724,40 @@ _LIST_PAGE_SIZE = 10   # cards shown per Load more tap
 _LIST_FETCH_SIZE = 50  # max fetched from OmniHR in one call
 
 
+async def _resolve_doc_ids(
+    client, user_id: int, submission_ids: list[int]
+) -> dict[int, int]:
+    """Resolve submission_id -> doc_id for the preview URL.
+
+    Tries local `receipts` table first, falls back to OmniHR's detail endpoint
+    for submissions filed outside the bot (where no local row exists).
+    """
+    resolved: dict[int, int] = {}
+    missing: list[int] = []
+    for sid in submission_ids:
+        local = storage.find_receipt_by_submission(user_id, sid)
+        if local and local.get("omnihr_doc_id"):
+            resolved[sid] = local["omnihr_doc_id"]
+        else:
+            missing.append(sid)
+
+    async def _fetch(sid: int) -> tuple[int, int | None]:
+        try:
+            detail = await client.get_submission_detail(sid)
+            docs = detail.get("expense_documents") or []
+            return sid, (docs[0].get("id") if docs else None)
+        except Exception as e:
+            log.warning("get_submission_detail failed for sub=%s: %s", sid, e)
+            return sid, None
+
+    if missing:
+        results = await asyncio.gather(*[_fetch(sid) for sid in missing])
+        for sid, did in results:
+            if did:
+                resolved[sid] = did
+    return resolved
+
+
 async def _do_list(
     update: Update,
     u: dict,
@@ -785,9 +819,11 @@ async def _do_list(
         )
 
     page_rows = rows[offset:offset + _LIST_PAGE_SIZE]
+    async with client_for(u) as client:
+        doc_ids = await _resolve_doc_ids(client, u["id"], [r["id"] for r in page_rows])
     for r in page_rows:
         local = storage.find_receipt_by_submission(u["id"], r["id"])
-        doc_id = local.get("omnihr_doc_id") if local else None
+        doc_id = doc_ids.get(r["id"])
         caption = _claim_summary(r, tenant_id=u.get("tenant_id"), doc_id=doc_id)
         kb = _claim_buttons(r)
         if local and local.get("tg_file_id"):
@@ -1367,17 +1403,24 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             filters = FILTER_SHORTCUTS.get(status_key, ACTIVE_STATUS_FILTERS)
             async with client_for(u) as client:
                 data = await client.list_submissions(status_filters=filters, page_size=15)
-            rows = data.get("results", [])
+                rows = data.get("results", [])
+                doc_ids = await _resolve_doc_ids(client, u["id"], [r["id"] for r in rows])
             if not rows:
                 return f"No {status_key} claims found."
+            tenant_id = u.get("tenant_id")
             lines = []
             for r in rows:
                 sl = STATUS_LABELS.get(r.get("status", 0), "?")
+                did = doc_ids.get(r["id"])
+                preview = (
+                    f" https://{tenant_id}.omnihr.co/document/preview/expense/{did}/"
+                    if did and tenant_id and tenant_id != "unknown" else ""
+                )
                 lines.append(
                     f"#{r['id']} {r.get('receipt_date','?')} "
                     f"{r.get('amount_currency','?')} {r.get('amount','?')} "
                     f"{r.get('merchant') or '?'} [{sl}] "
-                    f"{(r.get('description') or '')[:50]}"
+                    f"{(r.get('description') or '')[:50]}{preview}"
                 )
             return "\n".join(lines)
 
@@ -1435,19 +1478,25 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
         elif tool_name == "get_claim_summary":
             async with client_for(u) as client:
                 data = await client.list_submissions(page_size=30)
-            rows = data.get("results", [])
+                rows = data.get("results", [])
+                doc_ids = await _resolve_doc_ids(client, u["id"], [r["id"] for r in rows])
             if not rows:
                 return "No claims found."
-            # Build a summary for Claude to interpret
+            tenant_id = u.get("tenant_id")
             lines = []
             for r in rows:
                 sl = STATUS_LABELS.get(r.get("status", 0), "?")
+                did = doc_ids.get(r["id"])
+                preview = (
+                    f" preview=https://{tenant_id}.omnihr.co/document/preview/expense/{did}/"
+                    if did and tenant_id and tenant_id != "unknown" else ""
+                )
                 lines.append(
                     f"#{r['id']} date={r.get('receipt_date','?')} "
                     f"amt={r.get('amount_currency','?')} {r.get('amount','?')} "
                     f"merchant={r.get('merchant') or '?'} "
                     f"policy={(r.get('policy') or {}).get('name','?')} "
-                    f"status={sl}"
+                    f"status={sl}{preview}"
                 )
             return f"Claims ({len(rows)} total):\n" + "\n".join(lines)
 

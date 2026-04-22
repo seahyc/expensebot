@@ -272,6 +272,21 @@ class OmniHRClient:
                 break
         return None
 
+    async def get_submission_detail(self, submission_id: int) -> dict[str, Any]:
+        """GET /expense/2.0/user/{uid}/expense-metadata/{submission_id}/
+
+        Returns full submission including `expense_documents`, which the
+        list endpoint omits. Each document has an `id` — the doc_id used
+        for preview URLs: https://{tenant}.omnihr.co/document/preview/expense/{doc_id}/
+        """
+        await self._ensure_fresh()
+        resp = await self._http.get(
+            f"/expense/2.0/user/{self.employee_id}/expense-metadata/{submission_id}/",
+            cookies=self._cookies(),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # --- payload builder ---
 
     def _build_payload(
