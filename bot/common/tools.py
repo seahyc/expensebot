@@ -441,6 +441,43 @@ TOOLS = [
         },
     },
     {
+        "name": "send_to_user",
+        "description": (
+            "Send a file to the user's Telegram chat. Use when the user asks to see a receipt, "
+            "preview a document, or wants the actual file (not just a link). Sources:\n"
+            "- `submission_id`: fetch the raw receipt attached to an OmniHR claim.\n"
+            "- `gmail_query`: fetch from Gmail — prefers the attachment; if the email has no "
+            "binary attachment (HTML e-receipts like Grab, Ryde, Challenger), renders the body to PDF.\n"
+            "- `url`: render any webpage to PDF via WeasyPrint.\n"
+            "Exactly one source must be provided. Optional `caption` goes with the file.\n"
+            "If the channel doesn't support file delivery (e.g. WhatsApp/Lark today), you'll "
+            "get back an error — relay it to the user with the preview URL instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "submission_id": {
+                    "type": "integer",
+                    "description": "OmniHR submission id (e.g. 128682). Fetches the raw uploaded receipt.",
+                },
+                "gmail_query": {
+                    "type": "string",
+                    "description": "Gmail search query, e.g. 'from:no-reply@grab.com receipt 21 April 2026'. "
+                                   "Sends the first matching attachment, or a PDF rendering of the HTML body.",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Public URL to render to PDF, e.g. an online receipt page.",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional caption accompanying the file.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "update_profile",
         "description": (
             "Rewrite your always-in-context memory of WHO this user is — name, "

@@ -191,10 +191,14 @@ class HeartbeatRunner:
         Returns Claude's text response, or None on error.
         """
         profile_md = storage.get_profile_md(user["id"])
+        today_sgt = datetime.now(SGT).strftime("%Y-%m-%d (%A)")
         system = (
             f"{voice_for_user(user).agent_system}\n\n"
+            f"Today's date: {today_sgt} SGT.\n"
             "You are running a background health check — not a conversation.\n"
             "- Call the appropriate tool(s) to check the requested condition.\n"
+            "- Recent conversation history is attached below so you don't nudge about things the "
+            "user just handled. If a claim/topic was already discussed in the last few hours, stay silent.\n"
             "- If something needs the user's attention, reply with a concise actionable message.\n"
             "- If nothing needs attention, reply with exactly: HEARTBEAT_OK\n"
             "Do NOT add preamble. HEARTBEAT_OK means silence — the user will not see it."
@@ -208,7 +212,23 @@ class HeartbeatRunner:
             log.exception("Could not build Anthropic client for user=%s", user["id"])
             return None
 
-        messages: list[dict] = [{"role": "user", "content": task["prompt"]}]
+        # Prepend recent conversation so the heartbeat doesn't speak as if it just walked
+        # into the room. Without this, amnesia → nudges about just-filed claims.
+        recent = storage.get_recent_messages(user["id"], limit=12)
+        recent_block = ""
+        if recent:
+            lines = []
+            for m in recent:
+                ts = (m.get("created_at") or "")[:16]
+                role = "user" if m.get("direction") == "in" else "janai"
+                body = (m.get("body") or "").replace("\n", " ")[:400]
+                lines.append(f"[{ts}] {role}: {body}")
+            recent_block = "## Recent conversation (last ~12 messages)\n" + "\n".join(lines)
+
+        task_prompt = task["prompt"]
+        if recent_block:
+            task_prompt = f"{recent_block}\n\n---\n\n{task_prompt}"
+        messages: list[dict] = [{"role": "user", "content": task_prompt}]
 
         tool_executor = _build_heartbeat_tool_executor(user, self.omnihr_factory)
 

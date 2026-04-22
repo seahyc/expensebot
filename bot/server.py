@@ -30,6 +30,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import io
+
 import httpx
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI, HTTPException, Request
@@ -1755,25 +1757,113 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                 )
             att_bytes, att_filename, att_mime = attach
 
-            # Inject into the normal parse+confirm flow — same UX as user sending the photo
-            import io
-            buf = io.BytesIO(att_bytes)
-            buf.name = att_filename
-            asyncio.create_task(
-                _process_receipt_file(
-                    bot=bot,
-                    chat_id=chat_id,
-                    u=u,
-                    file_bytes=att_bytes,
-                    media_type=att_mime,
-                    filename=att_filename,
-                    tg_file_id="",
-                    tg_file_type="document",
-                    user_note=description_hint or merchant_hint,
-                    send_preview=True,
-                )
+            # Inject into the normal parse+confirm flow — same UX as user sending the photo.
+            # Awaited inline (not create_task) so _pending_files is populated before the
+            # agent's next tool call in the same response — otherwise confirm_pending_receipt
+            # races and sees no pending file.
+            await _process_receipt_file(
+                bot=bot,
+                chat_id=chat_id,
+                u=u,
+                file_bytes=att_bytes,
+                media_type=att_mime,
+                filename=att_filename,
+                tg_file_id="",
+                tg_file_type="document",
+                user_note=description_hint or merchant_hint,
+                send_preview=True,
             )
-            return f"Fetched '{att_filename}' from your Gmail — sending it now for review. Use the buttons to file or skip."
+            return f"Fetched '{att_filename}' from your Gmail and parsed it — pending receipt is ready. Call confirm_pending_receipt to file."
+
+        elif tool_name == "send_to_user":
+            if bot is None or chat_id is None:
+                return "send_to_user: no bot/chat_id in scope — outbound file send requires an active Telegram chat."
+            if u.get("channel") != "telegram":
+                return (
+                    f"send_to_user: file delivery isn't wired for channel={u.get('channel')} yet — "
+                    "only Telegram is supported today. Relay the preview URL to the user instead."
+                )
+            sub_id = tool_input.get("submission_id")
+            gmail_q = tool_input.get("gmail_query")
+            url = tool_input.get("url")
+            caption = (tool_input.get("caption") or "")[:1024]
+            provided = [bool(sub_id), bool(gmail_q), bool(url)]
+            if sum(provided) != 1:
+                return "send_to_user requires exactly one of: submission_id, gmail_query, url."
+
+            file_bytes: bytes | None = None
+            filename: str = "receipt"
+            mime: str = "application/octet-stream"
+
+            try:
+                if sub_id:
+                    # Prefer local receipts row; fall back to OmniHR detail endpoint.
+                    local = storage.find_receipt_by_submission(u["id"], int(sub_id))
+                    file_path = None
+                    if local and local.get("omnihr_file_path"):
+                        file_path = local["omnihr_file_path"]
+                        filename = local.get("omnihr_file_name") or f"claim-{sub_id}"
+                        mime = local.get("omnihr_file_mime") or mime
+                    else:
+                        async with client_for(u) as client:
+                            detail = await client.get_submission_detail(int(sub_id))
+                        docs = detail.get("expense_documents") or []
+                        if not docs:
+                            return f"Claim #{sub_id} has no attached documents on OmniHR."
+                        file_path = docs[0].get("file_path")
+                        filename = docs[0].get("name") or f"claim-{sub_id}"
+                    if not file_path:
+                        return f"Claim #{sub_id}: no downloadable file_path found."
+                    async with httpx.AsyncClient(timeout=30.0) as hc:
+                        r = await hc.get(file_path)
+                        r.raise_for_status()
+                        file_bytes = r.content
+                        mime = r.headers.get("content-type", mime).split(";")[0].strip()
+
+                elif gmail_q:
+                    from .common.context_lookup import fetch_gmail_attachment
+                    attach = await fetch_gmail_attachment(gmail_q, user_id=u["id"])
+                    if not attach:
+                        return f"No Gmail message matched query: '{gmail_q}'."
+                    file_bytes, filename, mime = attach
+
+                elif url:
+                    # Render any public URL to PDF via WeasyPrint.
+                    # Fetch HTML ourselves (WeasyPrint's url= doesn't send a browser UA).
+                    async with httpx.AsyncClient(
+                        timeout=20.0, follow_redirects=True,
+                        headers={"User-Agent": "Mozilla/5.0 expensebot/1.0"},
+                    ) as hc:
+                        r = await hc.get(url)
+                        r.raise_for_status()
+                        html_text = r.text
+                    from weasyprint import HTML
+                    file_bytes = HTML(string=html_text, base_url=url).write_pdf()
+                    # Name from last URL segment, else host.
+                    from urllib.parse import urlparse
+                    p = urlparse(url)
+                    stem = (p.path.rstrip("/").rsplit("/", 1)[-1] or p.netloc).replace(".", "_") or "page"
+                    filename = f"{stem}.pdf"
+                    mime = "application/pdf"
+            except httpx.HTTPError as e:
+                return f"send_to_user: fetch failed — {e!s}"
+            except Exception as e:
+                log.exception("send_to_user error")
+                return f"send_to_user: {e!s}"
+
+            if not file_bytes:
+                return "send_to_user: produced empty file."
+
+            buf = io.BytesIO(file_bytes)
+            buf.name = filename
+            try:
+                if mime.startswith("image/"):
+                    await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption or None)
+                else:
+                    await bot.send_document(chat_id=chat_id, document=buf, filename=filename, caption=caption or None)
+            except Exception as e:
+                return f"send_to_user: Telegram send failed — {e!s}"
+            return f"Sent '{filename}' ({len(file_bytes)} bytes) to the user."
 
         elif tool_name == "ask_choice":
             if bot is None or chat_id is None:
