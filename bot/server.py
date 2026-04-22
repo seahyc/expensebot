@@ -1797,23 +1797,18 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
 
             try:
                 if sub_id:
-                    # Prefer local receipts row; fall back to OmniHR detail endpoint.
-                    local = storage.find_receipt_by_submission(u["id"], int(sub_id))
-                    file_path = None
-                    if local and local.get("omnihr_file_path"):
-                        file_path = local["omnihr_file_path"]
-                        filename = local.get("omnihr_file_name") or f"claim-{sub_id}"
-                        mime = local.get("omnihr_file_mime") or mime
-                    else:
-                        async with client_for(u) as client:
-                            detail = await client.get_submission_detail(int(sub_id))
-                        docs = detail.get("expense_documents") or []
-                        if not docs:
-                            return f"Claim #{sub_id} has no attached documents on OmniHR."
-                        file_path = docs[0].get("file_path")
-                        filename = docs[0].get("name") or f"claim-{sub_id}"
+                    # Always fetch a fresh signed URL from the detail endpoint — the
+                    # local row's omnihr_file_path can expire/churn.
+                    async with client_for(u) as client:
+                        detail = await client.get_submission_detail(int(sub_id))
+                    docs = detail.get("expense_documents") or []
+                    if not docs:
+                        return f"Claim #{sub_id} has no attached documents on OmniHR."
+                    doc = docs[0]
+                    file_path = doc.get("file_path")
+                    filename = doc.get("name") or f"claim-{sub_id}"
                     if not file_path:
-                        return f"Claim #{sub_id}: no downloadable file_path found."
+                        return f"Claim #{sub_id}: no downloadable file_path found on document."
                     async with httpx.AsyncClient(timeout=30.0) as hc:
                         r = await hc.get(file_path)
                         r.raise_for_status()
