@@ -1409,6 +1409,20 @@ async def _record_merchant_after_submit(client, u: dict, submission_id: int) -> 
             log.exception("record_merchant_choice failed for user=%s", u["id"])
 
 
+_TOOL_INTERIM_TOOLS = {
+    # Tools where we fire a voice-tailored interim text message before running
+    # (so the user gets visible feedback on bridges that strip typing actions).
+    # Copy lives in each voice pack as `interim_<tool_name>`.
+    "send_to_user",
+    "parse_receipt",
+    "file_from_email",
+    "file_expense",
+    "search_email_context",
+    "search_calendar_context",
+    "get_omnihr_context",
+}
+
+
 _TOOL_CHAT_ACTION = {
     # Per-tool Telegram chat action — refreshed every 4s while the tool runs so
     # the user sees a live indicator instead of a stall.
@@ -1472,6 +1486,18 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
 
     async def execute(tool_name: str, tool_input: dict) -> str:
         action = _TOOL_CHAT_ACTION.get(tool_name, "typing")
+        # Fire a voice-tailored interim message for slow tools so the user sees
+        # feedback even on bridges that don't relay Telegram typing actions (Beeper/Matrix).
+        if bot and chat_id and tool_name in _TOOL_INTERIM_TOOLS:
+            try:
+                phrase = voice_for_user(u).text(f"interim_{tool_name}")
+            except KeyError:
+                phrase = None
+            if phrase:
+                try:
+                    await bot.send_message(chat_id=chat_id, text=phrase)
+                except Exception:
+                    pass
         async with _typing_pulse(bot, chat_id, action=action):
             return await _execute_inner(tool_name, tool_input)
 
