@@ -305,6 +305,11 @@ async function startSession(sessionId) {
           for (const jid of groupJids) {
             state.knownJids.add(jid);
             try { upsertJid.run(sessionId, jid); } catch (_) {}
+            // Persist group name so list_whatsapp_chats can show "Family WhatsApp"
+            // instead of a raw 12345@g.us. Mute/archive/pin still come from
+            // chats events when those fire.
+            const meta = groups[jid] || {};
+            persistChat(sessionId, { id: jid, subject: meta.subject || meta.name });
           }
         } catch (e) {
           log.warn({ sessionId, err: e.message }, "groupFetchAllParticipating failed");
@@ -415,6 +420,13 @@ async function startSession(sessionId) {
       if (c.id && !c.id.endsWith("@broadcast") && !isJidBroadcast(c.id)) {
         state.knownJids.add(c.id);
         try { upsertJid.run(sessionId, c.id); } catch (_) {}
+        // Persist contact display name for DMs. Baileys exposes either `name`
+        // (saved contact name) or `notify` (the name they set on their own
+        // profile). Prefer `name`. This gives list_whatsapp_chats real labels.
+        const displayName = c.name || c.notify || null;
+        if (displayName) {
+          persistChat(sessionId, { id: c.id, subject: displayName });
+        }
       }
     }
     scheduleBackfill();
