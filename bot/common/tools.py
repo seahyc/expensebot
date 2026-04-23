@@ -80,23 +80,23 @@ TOOLS = [
             "Replace the user's memory markdown — the file shown by /memories. "
             "Call this ONLY after the user has explicitly confirmed a proposed "
             "change in the same conversation turn. Takes the FULL new markdown, "
-            "not a diff. You MUST preserve the six section headers "
+            "not a diff. You MUST preserve the five section headers "
             "(Classification rules, Merchant shortcuts, Defaults, "
-            "Description style, Don't ask me about, Contact identities) and "
-            "their italic blurbs. Entries go under the right section as one-liner "
-            "bullets: **Short rule** — why (YYYY-MM-DD). Remove '- (none yet)' "
+            "Description style, Don't ask me about) and their italic blurbs. "
+            "Entries go under the right section as one-liner bullets: "
+            "**Short rule** — why (YYYY-MM-DD). Remove '- (none yet)' "
             "placeholders once a section has a real entry. "
-            "USE THIS (not update_profile) for: contact-ID → name mappings "
-            "('CP = 153845896351834@lid'), classification rules, merchant "
-            "shortcuts, expense defaults, and any structured lookup the user "
-            "has explicitly asked you to remember."
+            "USE THIS (not update_profile) for: classification rules, merchant "
+            "shortcuts, expense defaults, description style preferences. "
+            "DO NOT use this for contact-ID → name mappings — call name_contact "
+            "instead, which writes to a dedicated table."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "new_markdown": {
                     "type": "string",
-                    "description": "The full replacement markdown — all five sections, headers intact.",
+                    "description": "The full replacement markdown — all section headers intact.",
                 },
                 "change_summary": {
                     "type": "string",
@@ -524,6 +524,50 @@ TOOLS = [
                 },
             },
             "required": ["new_profile_md", "change_summary"],
+        },
+    },
+    {
+        "name": "name_contact",
+        "description": (
+            "Save a label for a raw WhatsApp/Telegram ID so you can render it as a "
+            "name instead of a JID in future chat tool output. ALWAYS use this — "
+            "not update_profile, not update_memories — when the user identifies a "
+            "previously-unknown sender ('that's CP, my contractor' / '231825372913907 "
+            "is YJ my brother'). The mapping is stored server-side and merged into "
+            "every list_whatsapp_chats / get_whatsapp_chat call automatically — you "
+            "don't need to track it yourself.\n\n"
+            "Channel is 'whatsapp' for ***@lid / ***@s.whatsapp.net JIDs and bare "
+            "phone numbers seen in WA tools; 'telegram' for telegram chat names. "
+            "JID must be the EXACT string the chat tool returned — same format, "
+            "same domain suffix. Label is the short display name you'll use ('CP', "
+            "'YJ', 'Sopisa'). Note is optional context for yourself ('contractor', "
+            "'brother', 'fiancée') — never shown back to the user.\n\n"
+            "Two-turn flow: first propose ('the person discussing grout — looks "
+            "like your contractor. Want me to remember them as CP?'), only call "
+            "this on explicit confirmation. To remove an alias, call with label=''."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "enum": ["whatsapp", "telegram"],
+                    "description": "Which chat backend the JID came from.",
+                },
+                "jid": {
+                    "type": "string",
+                    "description": "Raw ID from the chat tool, e.g. '132946434461886@lid' or '6512345678@s.whatsapp.net'.",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Display name to substitute for the JID. Empty string deletes the alias.",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Optional private context for you ('contractor', 'fiancée'). Not shown to the user.",
+                },
+            },
+            "required": ["channel", "jid", "label"],
         },
     },
 ]

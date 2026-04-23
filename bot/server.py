@@ -1682,6 +1682,23 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             log.info("profile updated for user=%s: %s", u["id"], change)
             return f"Saved. Summary: {change}"
 
+        elif tool_name == "name_contact":
+            channel = (tool_input.get("channel") or "").strip().lower()
+            jid = (tool_input.get("jid") or "").strip()
+            label = (tool_input.get("label") or "").strip()
+            note = tool_input.get("note") or None
+            if channel not in {"whatsapp", "telegram"}:
+                return f"name_contact: channel must be 'whatsapp' or 'telegram', got {channel!r}."
+            if not jid:
+                return "name_contact: jid is required."
+            if label:
+                storage.set_contact_alias(u["id"], channel, jid, label, note)
+                log.info("contact alias set user=%s channel=%s jid=%s label=%s", u["id"], channel, jid, label)
+                return f"Saved: {jid} → {label}. Future {channel} chat output will show '{label}' in place of the raw ID."
+            removed = storage.delete_contact_alias(u["id"], channel, jid)
+            log.info("contact alias removed user=%s channel=%s jid=%s removed=%s", u["id"], channel, jid, removed)
+            return f"Removed alias for {jid}." if removed else f"No alias was stored for {jid}."
+
         elif tool_name == "get_claim_summary":
             async with client_for(u) as client:
                 data = await client.list_submissions(page_size=30)
@@ -1880,8 +1897,11 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             chats: dict[str, dict] = {}
             # Sender JID -> displayed name, harvested from msg.pushName history.
             # Used as a fallback when the chat itself has no name (most often
-            # an unsaved DM contact that's messaged us at least once).
+            # an unsaved DM contact that's messaged us at least once). User
+            # aliases (set via name_contact) override any bridge-derived name —
+            # they get merged LAST below so the dict.update wins.
             names_by_jid: dict[str, str] = {}
+            user_aliases = storage.get_contact_aliases(u["id"], channel="whatsapp")
             async with httpx.AsyncClient() as _hc:
                 for _acct in wa_accounts:
                     sid = _acct["session_id"]
@@ -1923,6 +1943,8 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                                 entry["last"] = m["text"][:60]
                     except Exception:
                         continue
+            # User-curated aliases override anything the bridge derived.
+            names_by_jid.update(user_aliases)
             if not chats:
                 return f"No WhatsApp activity in the last {days} days (bridge may need reconnection)."
             # Sort: pinned → live → muted → archived. Within bucket, by message count desc.
@@ -1940,9 +1962,15 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             )
             lines = ["WhatsApp chats (pinned/live first, then muted, then archived):"]
             for jid, info in sorted_items:
-                # Three-tier name resolution: chat-level name (saved-contact /
-                # group subject) → most-recent pushName from this jid → raw jid.
-                label = info.get("name") or names_by_jid.get(jid) or jid
+                # Name resolution priority: user alias (set via name_contact) →
+                # bridge chat-level name (saved-contact / group subject) →
+                # bridge-recorded pushName → raw jid.
+                label = (
+                    user_aliases.get(jid)
+                    or info.get("name")
+                    or names_by_jid.get(jid)
+                    or jid
+                )
                 flags = []
                 if info.get("pinned"):
                     flags.append("📌pinned")
@@ -1971,6 +1999,8 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             contact_lower = contact.lower().replace("+", "").replace(" ", "")
             all_msgs: list[str] = []
             # Sender JID -> name, used to render "John: hello" instead of "***@lid: hello".
+            # User-curated aliases (name_contact) take precedence over anything from the bridge.
+            user_aliases = storage.get_contact_aliases(u["id"], channel="whatsapp")
             names_by_jid: dict[str, str] = {}
             chat_names_by_jid: dict[str, str] = {}
             async with httpx.AsyncClient() as _hc:
@@ -2000,10 +2030,11 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                             if contact_lower in jid or contact_lower in sender:
                                 ts = datetime.fromtimestamp(m["timestamp"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
                                 raw_sender = m.get("sender_jid", "?")
-                                # Prefer pushName for the sender; for DMs the sender == chat partner,
-                                # so the chat-level name (saved contact) also resolves cleanly here.
+                                # User alias wins over everything; otherwise prefer pushName,
+                                # then fall back to chat-level name (DMs only) or raw jid.
                                 sender_name = (
-                                    names_by_jid.get(raw_sender)
+                                    user_aliases.get(raw_sender)
+                                    or names_by_jid.get(raw_sender)
                                     or chat_names_by_jid.get(raw_sender)
                                     or raw_sender
                                 )

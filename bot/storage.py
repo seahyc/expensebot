@@ -142,6 +142,23 @@ CREATE TABLE IF NOT EXISTS whatsapp_accounts (
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, session_id)
 );
+
+-- User-curated alias table for chat/sender JIDs Janai couldn't auto-resolve.
+-- Channel = 'whatsapp' / 'telegram' / future. JID is the raw identifier the
+-- chat backend hands us (e.g. '132946434461886@lid', '6512345678@s.whatsapp.net').
+-- Display label is shown in chat tool output instead of the raw JID.
+CREATE TABLE IF NOT EXISTS contact_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    channel TEXT NOT NULL,
+    jid TEXT NOT NULL,
+    label TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, channel, jid)
+);
+CREATE INDEX IF NOT EXISTS contact_aliases_user ON contact_aliases(user_id, channel);
 """
 
 
@@ -389,6 +406,68 @@ def get_boss_profile_updated_at(user_id: int) -> str | None:
         return (row["boss_profile_updated_at"] if row else None)
 
 
+# --- Contact aliases (user-curated JID → label map) ---
+
+def set_contact_alias(
+    user_id: int,
+    channel: str,
+    jid: str,
+    label: str,
+    note: str | None = None,
+) -> None:
+    """Upsert a JID → label alias for this user. Channel is 'whatsapp' or 'telegram'."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO contact_aliases (user_id, channel, jid, label, note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, channel, jid) DO UPDATE SET
+              label = excluded.label,
+              note = excluded.note,
+              updated_at = excluded.updated_at
+            """,
+            (user_id, channel, jid, label, note, now, now),
+        )
+
+
+def delete_contact_alias(user_id: int, channel: str, jid: str) -> bool:
+    """Remove an alias. Returns True if a row was deleted."""
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM contact_aliases WHERE user_id=? AND channel=? AND jid=?",
+            (user_id, channel, jid),
+        )
+        return cur.rowcount > 0
+
+
+def get_contact_aliases(user_id: int, channel: str | None = None) -> dict[str, str]:
+    """Return {jid: label} for this user's aliases. Filter by channel if provided."""
+    with db() as conn:
+        if channel is None:
+            rows = conn.execute(
+                "SELECT jid, label FROM contact_aliases WHERE user_id=?",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT jid, label FROM contact_aliases WHERE user_id=? AND channel=?",
+                (user_id, channel),
+            ).fetchall()
+        return {r["jid"]: r["label"] for r in rows}
+
+
+def list_contact_aliases(user_id: int) -> list[dict]:
+    """Return all aliases as a list of dicts (for the agent to enumerate / debug)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT channel, jid, label, note, updated_at FROM contact_aliases "
+            "WHERE user_id=? ORDER BY channel, label",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 # --- Submit count (for self-learning harness) ---
 
 def increment_submit_count(user_id: int) -> None:
@@ -455,7 +534,7 @@ def set_omnihr_tokens(
 def users_with_expired_session(*, renotify_after: timedelta) -> list[dict]:
     """Users whose refresh token has already expired and who haven't been told
     in the last `renotify_after`. Used by the sweeper to DM a one-shot
-    'session expired, run /pair' prompt.
+    'session expired, run /connect_omnihr' prompt.
     """
     now = datetime.now(timezone.utc)
     cutoff_notified = (now - renotify_after).isoformat()
