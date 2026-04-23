@@ -43,6 +43,18 @@ db.exec(`
     created_at INTEGER DEFAULT (unixepoch())
   );
   CREATE INDEX IF NOT EXISTS idx_session_ts ON messages(session_id, timestamp);
+`);
+
+// Migration: add push_name column for new messages going forward. Older rows
+// stay NULL — they were processed before we started capturing the field.
+try {
+  db.exec(`ALTER TABLE messages ADD COLUMN push_name TEXT`);
+} catch (e) {
+  if (!/duplicate column/i.test(e.message)) throw e;
+}
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_session_chat_ts ON messages(session_id, chat_jid, timestamp DESC);
   CREATE TABLE IF NOT EXISTS known_jids (
     session_id TEXT NOT NULL,
     jid TEXT NOT NULL,
@@ -63,8 +75,21 @@ db.exec(`
 
 // Prepared statements
 const insertMsg = db.prepare(`
-  INSERT INTO messages (session_id, chat_jid, sender_jid, timestamp, text)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT INTO messages (session_id, chat_jid, sender_jid, timestamp, text, push_name)
+  VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+// Most-recent pushName seen for each sender JID. Used to resolve participant
+// names within chats (the @lid JIDs in group msgs and DM partner JIDs).
+const queryNames = db.prepare(`
+  SELECT sender_jid, push_name
+  FROM (
+    SELECT sender_jid, push_name,
+           ROW_NUMBER() OVER (PARTITION BY sender_jid ORDER BY timestamp DESC) AS rn
+    FROM messages
+    WHERE session_id = ? AND push_name IS NOT NULL AND sender_jid IS NOT NULL
+  )
+  WHERE rn = 1
 `);
 
 const upsertJid = db.prepare(`
@@ -271,18 +296,20 @@ async function syncChatsHistory(sessionId, chatJids) {
         if (ts < cutoffTs) continue;
         const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || null;
         if (!text) continue;
+        const pushName = (!msg.key.fromMe && msg.pushName) ? msg.pushName : null;
         try {
-          insertMsg.run(sessionId, jid, msg.key.participant || msg.key.remoteJid || jid, ts, text);
+          insertMsg.run(
+            sessionId,
+            jid,
+            msg.key.participant || msg.key.remoteJid || jid,
+            ts,
+            text,
+            pushName,
+          );
           total++;
         } catch (_) {}
-        // Same pushName fallback as in storeMessages — backfill historic
-        // messages also let us recover names for unsaved DM contacts.
-        if (
-          !msg.key.fromMe &&
-          msg.pushName &&
-          jid.endsWith("@s.whatsapp.net")
-        ) {
-          try { seedChatName.run(sessionId, jid, msg.pushName); } catch (_) {}
+        if (pushName && jid.endsWith("@s.whatsapp.net")) {
+          try { seedChatName.run(sessionId, jid, pushName); } catch (_) {}
         }
       }
     } catch (_) {}
@@ -432,23 +459,17 @@ async function startSession(sessionId) {
       const timestamp = msg.messageTimestamp
         ? Number(msg.messageTimestamp)
         : now;
+      const pushName = (!msg.key.fromMe && msg.pushName) ? msg.pushName : null;
 
-      // pushName fallback for unsaved DM contacts. msg.pushName is the name
-      // the sender set on their own WA profile. Only meaningful for DMs (in
-      // groups, pushName is the participant who sent the msg, not the group
-      // name). seedChatName never overwrites an existing name, so a saved
-      // contact name from contacts.upsert always wins.
-      if (
-        chatJid &&
-        !msg.key.fromMe &&
-        msg.pushName &&
-        chatJid.endsWith("@s.whatsapp.net")
-      ) {
-        try { seedChatName.run(sessionId, chatJid, msg.pushName); } catch (_) {}
+      // pushName fallback for unsaved DM contacts. Only meaningful for DMs at
+      // the chat level (in groups, pushName is the participant, not the group
+      // name). seedChatName never overwrites an existing name.
+      if (chatJid && pushName && chatJid.endsWith("@s.whatsapp.net")) {
+        try { seedChatName.run(sessionId, chatJid, pushName); } catch (_) {}
       }
 
       try {
-        insertMsg.run(sessionId, chatJid, senderJid, timestamp, text);
+        insertMsg.run(sessionId, chatJid, senderJid, timestamp, text, pushName);
         count++;
       } catch (e) {
         log.error({ sessionId, err: e.message }, "failed to insert message");
@@ -618,6 +639,23 @@ app.get("/messages/:session_id", (req, res) => {
     res.json({ messages: rows });
   } catch (e) {
     log.error({ session_id, err: e.message }, "query messages failed");
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /names/:session_id — return {jid: name} for every sender JID we've seen
+// a pushName for. Used to resolve participant names within group chats (where
+// senders show up as @lid JIDs that don't appear in the chats table).
+app.get("/names/:session_id", (req, res) => {
+  const { session_id } = req.params;
+  try {
+    const out = {};
+    for (const r of queryNames.all(session_id)) {
+      if (r.sender_jid && r.push_name) out[r.sender_jid] = r.push_name;
+    }
+    res.json({ names: out });
+  } catch (e) {
+    log.error({ session_id, err: e.message }, "query names failed");
     res.status(500).json({ error: e.message });
   }
 });

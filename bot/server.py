@@ -1858,6 +1858,10 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             since_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
             # Per-chat aggregate: {jid: {count, last, name, archived, muted, pinned, unread}}
             chats: dict[str, dict] = {}
+            # Sender JID -> displayed name, harvested from msg.pushName history.
+            # Used as a fallback when the chat itself has no name (most often
+            # an unsaved DM contact that's messaged us at least once).
+            names_by_jid: dict[str, str] = {}
             async with httpx.AsyncClient() as _hc:
                 for _acct in wa_accounts:
                     sid = _acct["session_id"]
@@ -1878,6 +1882,12 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                                     "pinned": bool(c.get("pinned")),
                                     "unread": int(c.get("unread_count") or 0),
                                 })
+                    except Exception:
+                        pass
+                    try:
+                        names_r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/names/{sid}", timeout=5.0)
+                        if names_r.status_code == 200:
+                            names_by_jid.update(names_r.json().get("names", {}) or {})
                     except Exception:
                         pass
                     # Pull recent messages so we can show counts + a snippet.
@@ -1910,7 +1920,9 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             )
             lines = ["WhatsApp chats (pinned/live first, then muted, then archived):"]
             for jid, info in sorted_items:
-                label = info.get("name") or jid
+                # Three-tier name resolution: chat-level name (saved-contact /
+                # group subject) → most-recent pushName from this jid → raw jid.
+                label = info.get("name") or names_by_jid.get(jid) or jid
                 flags = []
                 if info.get("pinned"):
                     flags.append("📌pinned")
@@ -1938,9 +1950,26 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             since_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
             contact_lower = contact.lower().replace("+", "").replace(" ", "")
             all_msgs: list[str] = []
+            # Sender JID -> name, used to render "John: hello" instead of "***@lid: hello".
+            names_by_jid: dict[str, str] = {}
+            chat_names_by_jid: dict[str, str] = {}
             async with httpx.AsyncClient() as _hc:
                 for _acct in wa_accounts:
                     sid = _acct["session_id"]
+                    try:
+                        names_r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/names/{sid}", timeout=5.0)
+                        if names_r.status_code == 200:
+                            names_by_jid.update(names_r.json().get("names", {}) or {})
+                    except Exception:
+                        pass
+                    try:
+                        chats_r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/chats/{sid}", timeout=5.0)
+                        if chats_r.status_code == 200:
+                            for c in chats_r.json().get("chats", []):
+                                if c.get("chat_jid") and c.get("name"):
+                                    chat_names_by_jid[c["chat_jid"]] = c["name"]
+                    except Exception:
+                        pass
                     try:
                         r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/messages/{sid}", params={"since": since_ts}, timeout=5.0)
                         if r.status_code != 200:
@@ -1950,7 +1979,15 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                             sender = (m.get("sender_jid") or "").lower().replace("+", "").replace(" ", "")
                             if contact_lower in jid or contact_lower in sender:
                                 ts = datetime.fromtimestamp(m["timestamp"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-                                all_msgs.append(f"[{ts}] {m.get('sender_jid','?')}: {m.get('text','')[:200]}")
+                                raw_sender = m.get("sender_jid", "?")
+                                # Prefer pushName for the sender; for DMs the sender == chat partner,
+                                # so the chat-level name (saved contact) also resolves cleanly here.
+                                sender_name = (
+                                    names_by_jid.get(raw_sender)
+                                    or chat_names_by_jid.get(raw_sender)
+                                    or raw_sender
+                                )
+                                all_msgs.append(f"[{ts}] {sender_name}: {m.get('text','')[:200]}")
                     except Exception:
                         continue
             if not all_msgs:
