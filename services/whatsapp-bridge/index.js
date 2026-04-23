@@ -102,6 +102,18 @@ const queryChats = db.prepare(`
   WHERE session_id = ?
 `);
 
+// Fill in a name only when the row has none. Used for low-priority sources
+// like pushName (the sender's self-set profile name on incoming messages),
+// which should never overwrite a saved-contact name from contacts.upsert.
+// Note the COALESCE order: chats.name first → existing wins.
+const seedChatName = db.prepare(`
+  INSERT INTO chats (session_id, chat_jid, name, updated_at)
+  VALUES (?, ?, ?, unixepoch())
+  ON CONFLICT(session_id, chat_jid) DO UPDATE SET
+    name = COALESCE(chats.name, excluded.name),
+    updated_at = unixepoch()
+`);
+
 // Translate a Baileys Chat object into the columns we store. Returns null if
 // the chat is unusable (e.g. broadcast/status). Each field is null when absent
 // so the COALESCE in upsertChat preserves prior state.
@@ -226,6 +238,15 @@ async function syncChatsHistory(sessionId, chatJids) {
           insertMsg.run(sessionId, jid, msg.key.participant || msg.key.remoteJid || jid, ts, text);
           total++;
         } catch (_) {}
+        // Same pushName fallback as in storeMessages — backfill historic
+        // messages also let us recover names for unsaved DM contacts.
+        if (
+          !msg.key.fromMe &&
+          msg.pushName &&
+          jid.endsWith("@s.whatsapp.net")
+        ) {
+          try { seedChatName.run(sessionId, jid, msg.pushName); } catch (_) {}
+        }
       }
     } catch (_) {}
   }
@@ -368,6 +389,20 @@ async function startSession(sessionId) {
       const timestamp = msg.messageTimestamp
         ? Number(msg.messageTimestamp)
         : now;
+
+      // pushName fallback for unsaved DM contacts. msg.pushName is the name
+      // the sender set on their own WA profile. Only meaningful for DMs (in
+      // groups, pushName is the participant who sent the msg, not the group
+      // name). seedChatName never overwrites an existing name, so a saved
+      // contact name from contacts.upsert always wins.
+      if (
+        chatJid &&
+        !msg.key.fromMe &&
+        msg.pushName &&
+        chatJid.endsWith("@s.whatsapp.net")
+      ) {
+        try { seedChatName.run(sessionId, chatJid, msg.pushName); } catch (_) {}
+      }
 
       try {
         insertMsg.run(sessionId, chatJid, senderJid, timestamp, text);
