@@ -182,9 +182,29 @@ def load_tenant_md(tenant_id: str | None) -> str:
 
 def load_user_md(_user: dict) -> str:
     """Return the user's memory — falls back to the scaffold template so the
-    agent always sees the five section headers and can slot new entries in."""
+    agent always sees the section headers and can slot new entries in.
+
+    Also migrates older stored memories to include any new section headers
+    introduced after the user first stored their memory. Missing sections
+    are appended (with their italic description + '(none yet)' placeholder)
+    so the agent can use them without the user having to manually edit.
+    """
     stored = (_user.get("user_md") or "").strip()
-    return stored if stored else memory_template(_user)
+    template = memory_template(_user)
+    if not stored:
+        return template
+
+    # Find every "## <section>" header in the template and ensure each exists
+    # in stored. If missing, append the template's block for that section.
+    import re
+    template_sections = re.split(r"(?m)^(## .+)$", template)
+    # Pairs of (header, body); first element is the file preamble.
+    pairs = list(zip(template_sections[1::2], template_sections[2::2]))
+    appended: list[str] = []
+    for header, body in pairs:
+        if header not in stored:
+            appended.append(f"{header}{body.rstrip()}\n")
+    return stored + ("\n\n" + "\n".join(appended) if appended else "")
 
 
 # ---------------------------------------------------------------------------
