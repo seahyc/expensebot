@@ -2280,18 +2280,24 @@ async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot, log
         )
     tool_turns_json: str | None = None
     try:
-        reply, tool_turns_json = await run_agent(
-            anthropic=anth,
-            user_message=text,
-            has_file=False,
-            user_md=user_md,
-            profile_md=storage.get_profile_md(u["id"]),
-            boss_profile_md=storage.get_boss_profile_md(u["id"]),
-            tool_executor=executor,
-            conversation_history=history,
-            user=u,
-            pending_receipt_md=pending_receipt_md,
+        reply, tool_turns_json = await asyncio.wait_for(
+            run_agent(
+                anthropic=anth,
+                user_message=text,
+                has_file=False,
+                user_md=user_md,
+                profile_md=storage.get_profile_md(u["id"]),
+                boss_profile_md=storage.get_boss_profile_md(u["id"]),
+                tool_executor=executor,
+                conversation_history=history,
+                user=u,
+                pending_receipt_md=pending_receipt_md,
+            ),
+            timeout=120.0,
         )
+    except asyncio.TimeoutError:
+        log.error("agent turn timed out after 120s for user=%s text=%r", u.get("id"), text[:80])
+        reply = "Ugh — I got stuck on that one, sorry. Try again in a sec?"
     except Exception as e:
         log.warning("agent failed in choice callback: %s", e)
         reply = f"Something went wrong: {e}"
@@ -2414,18 +2420,24 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     tool_turns_json: str | None = None
     try:
-        reply, tool_turns_json = await run_agent(
-            anthropic=anth,
-            user_message=text,
-            has_file=False,
-            user_md=user_md,
-            profile_md=storage.get_profile_md(u["id"]),
-            boss_profile_md=storage.get_boss_profile_md(u["id"]),
-            tool_executor=executor,
-            conversation_history=history,
-            user=u,
-            pending_receipt_md=pending_receipt_md,
+        reply, tool_turns_json = await asyncio.wait_for(
+            run_agent(
+                anthropic=anth,
+                user_message=text,
+                has_file=False,
+                user_md=user_md,
+                profile_md=storage.get_profile_md(u["id"]),
+                boss_profile_md=storage.get_boss_profile_md(u["id"]),
+                tool_executor=executor,
+                conversation_history=history,
+                user=u,
+                pending_receipt_md=pending_receipt_md,
+            ),
+            timeout=120.0,
         )
+    except asyncio.TimeoutError:
+        log.error("agent turn timed out after 120s user=%s text=%r", u.get("id"), text[:80])
+        reply = "Ugh — I got stuck on that one, sorry. Try again in a sec?"
     except Exception as e:
         log.warning("agent failed: %s", e)
         reply = f"Something went wrong: {e}"

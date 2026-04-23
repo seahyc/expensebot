@@ -327,16 +327,22 @@ async def run_agent(
         _log_llm_input(user_id, turn, final_system_prompt, messages)
 
         try:
-            resp = await anthropic.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1024,
-                system=[
-                    {"type": "text", "text": CLAUDE_CODE_IDENTITY},
-                    {"type": "text", "text": final_system_prompt},
-                ],
-                tools=TOOLS,
-                messages=messages,
+            resp = await asyncio.wait_for(
+                anthropic.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1024,
+                    system=[
+                        {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+                        {"type": "text", "text": final_system_prompt},
+                    ],
+                    tools=TOOLS,
+                    messages=messages,
+                ),
+                timeout=60.0,
             )
+        except asyncio.TimeoutError:
+            log.error("anthropic call timed out after 60s user=%s turn=%d", user_id, turn)
+            return "Hmm, that took too long to think through. Try again?", None
         except Exception as e:
             log.warning("agent call failed: %s", e)
             msg = str(e)
