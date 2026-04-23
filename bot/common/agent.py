@@ -32,6 +32,39 @@ log = logging.getLogger(__name__)
 _tel = logging.getLogger("janai.llm")  # structured LLM telemetry — set to DEBUG to see full payloads
 
 
+def _render_tool_error(tool_name: str, err: Exception) -> str:
+    """Return a compact structured error block for the next LLM turn.
+
+    The model sees this as a tool_result and can decide whether to apologize,
+    ask the user to reconnect an integration, retry with a narrower query, or
+    offer another path.
+    """
+    err_type = type(err).__name__
+    msg = str(err).strip() or repr(err)
+    lines = [
+        "TOOL_ERROR",
+        f"tool: {tool_name}",
+        f"type: {err_type}",
+        f"message: {msg}",
+    ]
+    if err_type == "AuthError":
+        lines.extend([
+            "recovery: explain the integration needs to be reconnected before retrying. Choose the correct command from your available command list in system context.",
+            "response_style: be brief, state the action plainly, do not mention internal errors or tokens unless the user asks.",
+        ])
+    elif err_type == "ValidationError":
+        lines.extend([
+            "recovery: explain what input is missing or malformed and ask for the minimum detail needed to retry.",
+            "response_style: be brief and specific.",
+        ])
+    elif err_type == "SchemaDriftError":
+        lines.extend([
+            "recovery: tell the user the OmniHR form changed and ask them to try again later.",
+            "response_style: be brief and avoid technical detail.",
+        ])
+    return "\n".join(lines)
+
+
 def _log_llm_input(user_id: Any, turn: int, system_prompt: str, messages: list) -> None:
     if not _tel.isEnabledFor(logging.DEBUG):
         # Always log a compact summary at INFO
@@ -389,11 +422,14 @@ async def run_agent(
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - t0
                 log.error("tool_timeout user=%s tool=%s input=%s elapsed=%.1fs", user_id, tc.name, json.dumps(tc.input)[:200], elapsed)
-                result = f"Error: {tc.name} timed out after 45s — tell the user something went wrong and to try again."
+                result = _render_tool_error(
+                    tc.name,
+                    TimeoutError(f"{tc.name} timed out after 45s"),
+                )
             except Exception as e:
                 elapsed = time.monotonic() - t0
                 log.exception("tool_error user=%s tool=%s elapsed=%.1fs", user_id, tc.name, elapsed)
-                result = f"Error: {e}"
+                result = _render_tool_error(tc.name, e)
             else:
                 elapsed = time.monotonic() - t0
                 log.info("tool_done user=%s tool=%s elapsed=%.2fs result_preview=%s", user_id, tc.name, elapsed, str(result)[:200].replace("\n", " "))

@@ -4,8 +4,11 @@ OmniHR sets HttpOnly cookies for access_token + refresh_token on api.omnihr.co.
 We never see the cookies in browser JS — extension reads them via chrome.cookies
 and pushes to backend. Backend uses them as plain cookies in httpx.
 
-Access token TTL: ~15 minutes
-Refresh token TTL: ~30 days
+Access token TTL: short-lived (observed around minutes)
+Refresh token TTL: do not assume a fixed duration; use the JWT exp from the
+cookie captured at pair time. In production we've observed already-aged refresh
+cookies with only a few days remaining when the user pairs against an existing
+browser session.
 """
 
 from __future__ import annotations
@@ -74,7 +77,7 @@ async def refresh_access_token(client: httpx.AsyncClient, refresh_token: str) ->
         json={},
     )
     if resp.status_code == 401:
-        raise AuthError("Refresh token rejected — user must re-pair")
+        raise AuthError("Refresh token rejected — user must reconnect OmniHR")
     resp.raise_for_status()
 
     new_access = resp.cookies.get("access_token")
