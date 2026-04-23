@@ -3700,6 +3700,43 @@ async function submitKey(){{
 # Background: boss profile builder
 # ---------------------------------------------------------------------------
 
+async def _recover_unreplied_inbound(tg_app) -> None:
+    """If the previous run crashed mid-turn, any unreplied inbound will sit
+    in the DB with no matching 'out' row. Send a one-shot recovery nudge so
+    the user isn't left hanging. One nudge per user (latest unreplied message)."""
+    await asyncio.sleep(2)
+    try:
+        rows = storage.find_unreplied_inbound(max_age_minutes=60)
+    except Exception:
+        log.exception("_recover_unreplied_inbound: query failed")
+        return
+    if not rows:
+        return
+    seen: set[int] = set()
+    for r in rows:
+        uid = r["user_id"]
+        if uid in seen:
+            continue
+        seen.add(uid)
+        if r.get("channel") != "telegram" or not r.get("channel_user_id"):
+            continue
+        preview = (r.get("body") or "")[:80]
+        msg = (
+            f"Hey — I saw your last message (\"{preview}\") but something hiccuped on my side "
+            f"before I could reply. Send it again?"
+        )
+        try:
+            await tg_app.bot.send_message(
+                chat_id=int(r["channel_user_id"]),
+                text=msg,
+                disable_web_page_preview=True,
+            )
+            storage.log_message(uid, "out", msg)
+            log.info("crash-recovery nudge sent user=%s inbound_id=%s", uid, r["id"])
+        except Exception:
+            log.exception("crash-recovery send failed user=%s", uid)
+
+
 async def _reconnect_whatsapp_sessions() -> None:
     """On startup, reconnect all WhatsApp sessions that were active before restart."""
     await asyncio.sleep(3)  # let the bridge finish initializing
@@ -3834,6 +3871,9 @@ async def run() -> None:
 
     # Reconnect any WhatsApp sessions that were active before restart
     asyncio.create_task(_reconnect_whatsapp_sessions())
+
+    # If the previous run crashed mid-turn, nudge any unreplied users
+    asyncio.create_task(_recover_unreplied_inbound(tg_app))
 
     # Warm up TTS model download + load in the background so the first voice
     # reply isn't a 30s wait. Non-fatal if it fails; synthesize() retries on demand.

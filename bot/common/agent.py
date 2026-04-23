@@ -9,8 +9,10 @@ Only the user message + recent claims context varies per call.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -375,11 +377,20 @@ async def run_agent(
         tool_results = []
         for tc in tool_calls:
             log.info("tool_call user=%s turn=%d tool=%s input=%s", user_id, turn, tc.name, json.dumps(tc.input)[:200])
+            t0 = time.monotonic()
             try:
-                result = await tool_executor(tc.name, tc.input)
+                result = await asyncio.wait_for(tool_executor(tc.name, tc.input), timeout=45.0)
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                log.error("tool_timeout user=%s tool=%s input=%s elapsed=%.1fs", user_id, tc.name, json.dumps(tc.input)[:200], elapsed)
+                result = f"Error: {tc.name} timed out after 45s — tell the user something went wrong and to try again."
             except Exception as e:
+                elapsed = time.monotonic() - t0
+                log.exception("tool_error user=%s tool=%s elapsed=%.1fs", user_id, tc.name, elapsed)
                 result = f"Error: {e}"
-            log.debug("tool_result user=%s tool=%s result=%s", user_id, tc.name, str(result)[:500])
+            else:
+                elapsed = time.monotonic() - t0
+                log.info("tool_done user=%s tool=%s elapsed=%.2fs result_preview=%s", user_id, tc.name, elapsed, str(result)[:200].replace("\n", " "))
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tc.id,

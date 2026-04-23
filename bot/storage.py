@@ -822,6 +822,30 @@ def log_message(
         )
 
 
+def find_unreplied_inbound(*, max_age_minutes: int = 60) -> list[dict]:
+    """Return inbound messages newer than `max_age_minutes` with no later outbound
+    from the same user — i.e. the agent took the message but crashed before replying.
+    Used on startup to recover from mid-turn crashes."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT m.id, m.user_id, m.body, m.created_at, u.channel, u.channel_user_id
+               FROM messages m
+               JOIN users u ON u.id = m.user_id
+               WHERE m.direction = 'in'
+                 AND datetime(m.created_at) > datetime(?)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM messages m2
+                   WHERE m2.user_id = m.user_id
+                     AND m2.direction = 'out'
+                     AND datetime(m2.created_at) > datetime(m.created_at)
+                 )
+               ORDER BY m.created_at DESC""",
+            (cutoff,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_recent_messages(user_id: int, limit: int = 10) -> list[dict]:
     """Return the last `limit` text messages for user, oldest first, for conversation history."""
     with db() as conn:
