@@ -2253,14 +2253,16 @@ async def _keep_action(bot, chat_id: int, action, stop_event: asyncio.Event) -> 
             pass
 
 
-async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot) -> None:
-    """Run one Janai turn as if the user had typed `text`. Used by button-choice callbacks."""
+async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot, log_inbound: bool = True) -> None:
+    """Run one Janai turn as if the user had typed `text`. Used by button-choice callbacks
+    and by crash recovery (where the inbound is already logged — pass log_inbound=False)."""
     try:
         anth = await anthropic_for(u)
     except RuntimeError as e:
         log.warning("_run_agent_turn_for_text: no anthropic for user=%s: %s", u.get("id"), e)
         return
-    storage.log_message(u["id"], "in", text)
+    if log_inbound:
+        storage.log_message(u["id"], "in", text)
     storage.bump_last_inbound_at(u["id"])
     user_md = load_user_md(u)
     executor = await _build_tool_executor(u, bot=bot, chat_id=chat_id)
@@ -3702,8 +3704,9 @@ async function submitKey(){{
 
 async def _recover_unreplied_inbound(tg_app) -> None:
     """If the previous run crashed mid-turn, any unreplied inbound will sit
-    in the DB with no matching 'out' row. Send a one-shot recovery nudge so
-    the user isn't left hanging. One nudge per user (latest unreplied message)."""
+    in the DB with no matching 'out' row. Re-run the agent on the latest
+    unreplied text per user so they actually get an answer. File-only inbounds
+    are skipped (we don't have the bytes anymore)."""
     await asyncio.sleep(2)
     try:
         rows = storage.find_unreplied_inbound(max_age_minutes=60)
@@ -3720,21 +3723,33 @@ async def _recover_unreplied_inbound(tg_app) -> None:
         seen.add(uid)
         if r.get("channel") != "telegram" or not r.get("channel_user_id"):
             continue
-        preview = (r.get("body") or "")[:80]
-        msg = (
-            f"Hey — I saw your last message (\"{preview}\") but something hiccuped on my side "
-            f"before I could reply. Send it again?"
-        )
+        body = (r.get("body") or "").strip()
+        if not body or body.startswith("[voice note]") or body.startswith("[file]"):
+            # Can't replay voice/file — bytes are gone. Nudge the user instead.
+            try:
+                await tg_app.bot.send_message(
+                    chat_id=int(r["channel_user_id"]),
+                    text="Hey — I choked on your last message before I could reply. Mind sending it again?",
+                    disable_web_page_preview=True,
+                )
+                storage.log_message(uid, "out", "recovery-nudge")
+            except Exception:
+                log.exception("crash-recovery nudge failed user=%s", uid)
+            continue
+        u = storage.get_user(uid)
+        if not u:
+            continue
         try:
-            await tg_app.bot.send_message(
+            log.info("crash-recovery replay user=%s inbound_id=%s body=%r", uid, r["id"], body[:80])
+            await _run_agent_turn_for_text(
+                u=u,
                 chat_id=int(r["channel_user_id"]),
-                text=msg,
-                disable_web_page_preview=True,
+                text=body,
+                bot=tg_app.bot,
+                log_inbound=False,
             )
-            storage.log_message(uid, "out", msg)
-            log.info("crash-recovery nudge sent user=%s inbound_id=%s", uid, r["id"])
         except Exception:
-            log.exception("crash-recovery send failed user=%s", uid)
+            log.exception("crash-recovery replay failed user=%s", uid)
 
 
 async def _reconnect_whatsapp_sessions() -> None:
