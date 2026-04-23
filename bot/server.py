@@ -62,7 +62,7 @@ from omnihr_client.exceptions import AuthError, SchemaDriftError, ValidationErro
 from omnihr_client.policies import PolicyEntry, get_policies
 from omnihr_client.schema import invalidate_schema
 
-from . import access, claude_oauth, learning, logging_setup, pages, rate_limit, storage
+from . import access, claude_oauth, learning, logging_setup, pages, rate_limit, storage, stt, tts
 from .common.agent import run_agent, render_merchants_block
 from .common.boss_profile import refresh_boss_profile
 from .plugins.registry import load_enabled_skills, load_enabled_tools
@@ -2437,6 +2437,167 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text(reply)
 
 
+MAX_VOICE_BYTES = 5 * 1024 * 1024  # Telegram voice notes cap out well under this
+
+
+async def _send_voice_reply(bot, chat_id: int, reply_text: str, u: dict) -> bool:
+    """Synthesize `reply_text` with Kokoro and send as a Telegram voice note.
+
+    Returns True if a voice clip was sent, False if we fell back to / skipped TTS.
+    """
+    from telegram.constants import ChatAction
+    try:
+        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+    except Exception:
+        pass
+    try:
+        ogg = await tts.synthesize(reply_text)
+    except Exception:
+        log.exception("TTS synthesis failed for user=%s", u.get("id"))
+        return False
+    if not ogg:
+        return False
+    try:
+        await bot.send_voice(chat_id=chat_id, voice=ogg)
+        return True
+    except Exception:
+        log.exception("send_voice failed for user=%s", u.get("id"))
+        return False
+
+
+async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Voice note or video note → STT → agent → TTS voice reply (+ text for long replies)."""
+    if not await _gate(update):
+        return
+    msg = update.message
+    if not msg or not msg.from_user:
+        return
+
+    u = storage.get_user_by_channel("telegram", str(msg.from_user.id))
+    if not u:
+        user_db_id = storage.upsert_user("telegram", str(msg.from_user.id))
+        u = storage.get_user(user_db_id)
+        await msg.reply_text(
+            _next_step_prompt(user_db_id, u, msg.from_user.first_name),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        return
+
+    storage.bump_last_inbound_at(u["id"])
+
+    try:
+        anth = await anthropic_for(u)
+    except RuntimeError:
+        await msg.reply_text(
+            voice_for_user(u).text("connect_ai_first"),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        return
+
+    audio = msg.voice or msg.video_note
+    if not audio:
+        return
+    if audio.file_size and audio.file_size > MAX_VOICE_BYTES:
+        await msg.reply_text("That voice note's too long for me — try under 2 minutes? 🎧")
+        return
+
+    if not await _check_rate(update, u["id"], "parse"):
+        return
+
+    from telegram.constants import ChatAction
+    try:
+        await ctx.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+
+    try:
+        tg_file = await audio.get_file()
+        audio_bytes = bytes(await tg_file.download_as_bytearray())
+    except Exception:
+        log.exception("voice download failed for user=%s", u["id"])
+        await msg.reply_text("Couldn't download that voice note — try again? 🎧")
+        return
+
+    try:
+        transcription = await stt.transcribe(audio_bytes)
+    except Exception:
+        log.exception("STT failed for user=%s", u["id"])
+        await msg.reply_text(
+            "I couldn't quite catch that — could you type it or try again? 🎧"
+        )
+        return
+
+    if not transcription:
+        await msg.reply_text("I didn't hear anything — mind trying again? 🎧")
+        return
+
+    prefixed = f"[voice note] {transcription}"
+    storage.log_message(u["id"], "in", prefixed)
+
+    user_md = load_user_md(u)
+    executor = await _build_tool_executor(u, bot=ctx.bot, chat_id=msg.chat_id)
+    history = storage.get_recent_messages(u["id"], limit=12)
+
+    pending_receipt_md: str | None = None
+    _pf = _pending_files.get(msg.chat_id)
+    if _pf:
+        _p = _pf.parsed
+        pol = (
+            next((p.label for p in _pf.policies if p.id == _p.suggested_policy_id), f"#{_p.suggested_policy_id}")
+            if _p.suggested_policy_id else "?"
+        )
+        pending_receipt_md = (
+            f"- merchant: {_p.merchant}\n"
+            f"- amount: {_p.currency or 'SGD'} {_p.amount}\n"
+            f"- date: {_p.receipt_date}\n"
+            f"- suggested policy: {pol}\n"
+            f"- suggested sub-category: {_p.suggested_sub_category_label or '(none)'}\n"
+            f"- description draft: {_p.description_draft or '(none)'}\n"
+            f"- file: {_pf.filename}"
+        )
+
+    tool_turns_json: str | None = None
+    try:
+        reply, tool_turns_json = await run_agent(
+            anthropic=anth,
+            user_message=transcription,
+            has_file=False,
+            user_md=user_md,
+            profile_md=storage.get_profile_md(u["id"]),
+            boss_profile_md=storage.get_boss_profile_md(u["id"]),
+            tool_executor=executor,
+            conversation_history=history,
+            user=u,
+            pending_receipt_md=pending_receipt_md,
+        )
+    except Exception as e:
+        log.warning("agent failed on voice input: %s", e)
+        reply = f"Something went wrong: {e}"
+
+    storage.log_message(u["id"], "out", reply, tool_turns=tool_turns_json)
+    asyncio.create_task(learning.maybe_trigger_review(
+        user_id=u["id"], db=storage, anthropic_client=anth,
+        recent_messages=history, trigger="turn",
+    ))
+
+    sent_voice = await _send_voice_reply(ctx.bot, msg.chat_id, reply, u)
+
+    # Send the text too if we couldn't voice it, or if the reply carries structure
+    # (Markdown, long) that doesn't read well aloud.
+    needs_text = (
+        not sent_voice
+        or len(reply) > 500
+        or any(tok in reply for tok in ("```", "](", "• ", "- ", "\n1.", "\n2."))
+    )
+    if needs_text:
+        try:
+            await ctx.bot.send_message(chat_id=msg.chat_id, text=reply, parse_mode="Markdown")
+        except Exception:
+            await ctx.bot.send_message(chat_id=msg.chat_id, text=reply)
+
+
 async def on_contact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """User shared their phone number via the request_contact keyboard."""
     from telegram import ReplyKeyboardRemove
@@ -3603,6 +3764,7 @@ async def run() -> None:
     tg_app.add_handler(MessageHandler(filters.CONTACT, on_contact))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, on_file))
+    tg_app.add_handler(MessageHandler(filters.VOICE | filters.VIDEO_NOTE, on_voice))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     async def on_error(update, context):
@@ -3651,6 +3813,10 @@ async def run() -> None:
 
     # Reconnect any WhatsApp sessions that were active before restart
     asyncio.create_task(_reconnect_whatsapp_sessions())
+
+    # Warm up TTS model download + load in the background so the first voice
+    # reply isn't a 30s wait. Non-fatal if it fails; synthesize() retries on demand.
+    asyncio.create_task(tts.prefetch())
 
     await tg_app.start()
     polling_task = asyncio.create_task(

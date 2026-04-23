@@ -3,6 +3,7 @@ FROM python:3.12-slim
 # WeasyPrint runtime deps (rendering email HTML to PDF)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libpango-1.0-0 libpangoft2-1.0-0 fonts-dejavu-core zip \
+      ffmpeg espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -15,7 +16,8 @@ RUN pip install --no-cache-dir -U pip && \
       asyncpg>=0.29 redis>=5.0 pydantic>=2.9 python-telegram-bot>=21.6 \
       weasyprint>=63 boto3>=1.35 stripe>=10 pynacl>=1.5 structlog>=24 \
       claude-agent-sdk>=0.1 apscheduler>=3.10 telethon>=1.36 pymupdf>=1.24 \
-      playwright>=1.40
+      playwright>=1.40 \
+      useful-moonshine-onnx>=20251121 kokoro-onnx>=0.4.7 librosa>=0.10 soundfile>=0.12
 
 # Playwright Chromium + its runtime deps (~300MB — needed for URL→screenshot rendering)
 RUN playwright install --with-deps chromium
