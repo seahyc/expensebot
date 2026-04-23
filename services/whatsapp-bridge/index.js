@@ -215,6 +215,43 @@ function clearAuthState(sessionId) {
 // Baileys session management
 // ---------------------------------------------------------------------------
 
+// Recover display names for DM chats that are present in `messages` but have
+// no name in `chats` (the common case for unsaved contacts whose pushName was
+// never recorded — e.g. msgs received before the chats table existed). For
+// each candidate, fetch a few historic messages just to extract msg.pushName
+// and seed the chats table. Bounded so a fresh start doesn't hammer Baileys.
+async function backfillDmNames(sessionId, limit = 100) {
+  const state = sessions.get(sessionId);
+  if (!state?.socket || !state.connected) return;
+  const sock = state.socket;
+  const candidates = db.prepare(`
+    SELECT m.chat_jid, MAX(m.timestamp) AS last_ts
+    FROM messages m
+    LEFT JOIN chats c
+      ON c.session_id = m.session_id AND c.chat_jid = m.chat_jid
+    WHERE m.session_id = ?
+      AND m.chat_jid LIKE '%@s.whatsapp.net'
+      AND (c.name IS NULL)
+    GROUP BY m.chat_jid
+    ORDER BY last_ts DESC
+    LIMIT ?
+  `).all(sessionId, limit);
+
+  let recovered = 0;
+  for (const r of candidates) {
+    try {
+      const result = await sock.loadMessages(r.chat_jid, 8);
+      for (const msg of result?.messages || []) {
+        if (!msg?.key?.fromMe && msg?.pushName) {
+          try { seedChatName.run(sessionId, r.chat_jid, msg.pushName); recovered++; } catch (_) {}
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+  log.info({ sessionId, candidates: candidates.length, recovered }, "backfillDmNames: done");
+}
+
 async function syncChatsHistory(sessionId, chatJids) {
   const state = sessions.get(sessionId);
   if (!state?.socket || !state.connected) return;
@@ -341,7 +378,13 @@ async function startSession(sessionId) {
           syncChatsHistory(sessionId, allJids).catch((e) =>
             log.warn({ sessionId, err: e.message }, "syncChatsHistory error")
           );
-        } else {
+        }
+        // One-shot recovery for unsaved DM contacts whose names we never had a
+        // chance to capture. Runs alongside the group history sync.
+        backfillDmNames(sessionId, 150).catch((e) =>
+          log.warn({ sessionId, err: e.message }, "backfillDmNames error")
+        );
+        if (allJids.length === 0) {
           log.info({ sessionId }, "no known JIDs for backfill — waiting for contacts.upsert");
         }
       }, 5000);
