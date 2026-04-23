@@ -2237,9 +2237,14 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
 async def _keep_typing(bot, chat_id: int, stop_event: asyncio.Event) -> None:
     """Send typing action every 4s until stop_event is set."""
     from telegram.constants import ChatAction
+    await _keep_action(bot, chat_id, ChatAction.TYPING, stop_event)
+
+
+async def _keep_action(bot, chat_id: int, action, stop_event: asyncio.Event) -> None:
+    """Re-send a chat action every 4s until stop_event is set (Telegram actions last ~5s)."""
     while not stop_event.is_set():
         try:
-            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await bot.send_chat_action(chat_id=chat_id, action=action)
         except Exception:
             pass
         try:
@@ -2443,26 +2448,33 @@ MAX_VOICE_BYTES = 5 * 1024 * 1024  # Telegram voice notes cap out well under thi
 async def _send_voice_reply(bot, chat_id: int, reply_text: str, u: dict) -> bool:
     """Synthesize `reply_text` with Kokoro and send as a Telegram voice note.
 
+    Shows a persistent `record_voice` indicator for the full synthesis duration
+    (Telegram chat actions otherwise expire after ~5s).
+
     Returns True if a voice clip was sent, False if we fell back to / skipped TTS.
     """
     from telegram.constants import ChatAction
+    stop = asyncio.Event()
+    action_task = asyncio.create_task(
+        _keep_action(bot, chat_id, ChatAction.RECORD_VOICE, stop)
+    )
     try:
-        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-    except Exception:
-        pass
-    try:
-        ogg = await tts.synthesize(reply_text)
-    except Exception:
-        log.exception("TTS synthesis failed for user=%s", u.get("id"))
-        return False
-    if not ogg:
-        return False
-    try:
-        await bot.send_voice(chat_id=chat_id, voice=ogg)
-        return True
-    except Exception:
-        log.exception("send_voice failed for user=%s", u.get("id"))
-        return False
+        try:
+            ogg = await tts.synthesize(reply_text)
+        except Exception:
+            log.exception("TTS synthesis failed for user=%s", u.get("id"))
+            return False
+        if not ogg:
+            return False
+        try:
+            await bot.send_voice(chat_id=chat_id, voice=ogg)
+            return True
+        except Exception:
+            log.exception("send_voice failed for user=%s", u.get("id"))
+            return False
+    finally:
+        stop.set()
+        action_task.cancel()
 
 
 async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2506,32 +2518,36 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_rate(update, u["id"], "parse"):
         return
 
-    from telegram.constants import ChatAction
-    try:
-        await ctx.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.TYPING)
-    except Exception:
-        pass
+    # Keep the TYPING indicator alive for the whole think phase (download +
+    # STT + agent turn); we switch to RECORD_VOICE inside _send_voice_reply.
+    _stop_typing = asyncio.Event()
+    _typing_task = asyncio.create_task(_keep_typing(ctx.bot, msg.chat_id, _stop_typing))
 
     try:
-        tg_file = await audio.get_file()
-        audio_bytes = bytes(await tg_file.download_as_bytearray())
-    except Exception:
-        log.exception("voice download failed for user=%s", u["id"])
-        await msg.reply_text("Couldn't download that voice note — try again? 🎧")
-        return
+        try:
+            tg_file = await audio.get_file()
+            audio_bytes = bytes(await tg_file.download_as_bytearray())
+        except Exception:
+            log.exception("voice download failed for user=%s", u["id"])
+            await msg.reply_text("Couldn't download that voice note — try again? 🎧")
+            return
 
-    try:
-        transcription = await stt.transcribe(audio_bytes)
-    except Exception:
-        log.exception("STT failed for user=%s", u["id"])
-        await msg.reply_text(
-            "I couldn't quite catch that — could you type it or try again? 🎧"
-        )
-        return
+        try:
+            transcription = await stt.transcribe(audio_bytes)
+        except Exception:
+            log.exception("STT failed for user=%s", u["id"])
+            await msg.reply_text(
+                "I couldn't quite catch that — could you type it or try again? 🎧"
+            )
+            return
 
-    if not transcription:
-        await msg.reply_text("I didn't hear anything — mind trying again? 🎧")
-        return
+        if not transcription:
+            await msg.reply_text("I didn't hear anything — mind trying again? 🎧")
+            return
+    except BaseException:
+        _stop_typing.set()
+        _typing_task.cancel()
+        raise
 
     prefixed = f"[voice note] {transcription}"
     storage.log_message(u["id"], "in", prefixed)
@@ -2582,6 +2598,10 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user_id=u["id"], db=storage, anthropic_client=anth,
         recent_messages=history, trigger="turn",
     ))
+
+    # Hand off from TYPING to RECORD_VOICE.
+    _stop_typing.set()
+    _typing_task.cancel()
 
     sent_voice = await _send_voice_reply(ctx.bot, msg.chat_id, reply, u)
 
