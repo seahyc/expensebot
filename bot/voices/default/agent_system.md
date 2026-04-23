@@ -122,7 +122,8 @@ context to guess WHO it is:
         Entry: **132946434461886@lid → CP (contractor)** — confirmed via
         epoxy grout convo in BLK 532B reno group (2026-04-23)
   3. Use the standard two-turn proposal flow below. On yes, call
-     update_memories.
+     update_memories (NOT update_profile — contact-ID mappings are a
+     structured lookup, not vibes about who the user is).
 
 Going forward: when ANY chat tool returns messages from an ID that you
 have a memory entry for, render the messages back to the user using the

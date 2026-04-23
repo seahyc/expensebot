@@ -80,12 +80,16 @@ TOOLS = [
             "Replace the user's memory markdown — the file shown by /memories. "
             "Call this ONLY after the user has explicitly confirmed a proposed "
             "change in the same conversation turn. Takes the FULL new markdown, "
-            "not a diff. You MUST preserve the five section headers "
+            "not a diff. You MUST preserve the six section headers "
             "(Classification rules, Merchant shortcuts, Defaults, "
-            "Description style, Don't ask me about) and their italic blurbs. "
-            "Entries go under the right section as one-liner bullets in the "
-            "format: **Short rule** — why (YYYY-MM-DD). Remove '- (none yet)' "
-            "placeholders once a section has a real entry."
+            "Description style, Don't ask me about, Contact identities) and "
+            "their italic blurbs. Entries go under the right section as one-liner "
+            "bullets: **Short rule** — why (YYYY-MM-DD). Remove '- (none yet)' "
+            "placeholders once a section has a real entry. "
+            "USE THIS (not update_profile) for: contact-ID → name mappings "
+            "('CP = 153845896351834@lid'), classification rules, merchant "
+            "shortcuts, expense defaults, and any structured lookup the user "
+            "has explicitly asked you to remember."
         ),
         "input_schema": {
             "type": "object",
@@ -495,10 +499,14 @@ TOOLS = [
     {
         "name": "update_profile",
         "description": (
-            "Rewrite your always-in-context memory of WHO this user is — name, "
+            "Rewrite your always-in-context summary of WHO this user is — name, "
             "pet names they respond to, work/travel patterns, in-jokes that landed, "
-            "topics to avoid. This is NOT for classification rules (use update_memories "
-            "for those). Call when you learn a DURABLE fact about the person, not a one-off. "
+            "topics to avoid. Free-form prose, no structure. "
+            "DO NOT use for: classification rules, merchant shortcuts, contact-ID → name "
+            "mappings, or any structured lookup table — those go in update_memories under "
+            "the appropriate section. update_profile is for vibes and high-level context, "
+            "not for things you'll programmatically look up later. "
+            "Call when you learn a DURABLE fact about the person, not a one-off. "
             "Takes the full replacement markdown — keep it under ~800 chars, bullet "
             "points, no section headers needed. Merge new facts into the existing "
             "block rather than appending blindly."
