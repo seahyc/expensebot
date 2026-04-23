@@ -226,11 +226,29 @@ async def list_chats(
                     last_text = dialog.message.text[:100]
                     if dialog.message.date:
                         last_date = dialog.message.date.strftime("%m-%d %H:%M")
+                # Mute state: notify_settings.mute_until is a datetime in the future when muted.
+                # Telethon also exposes dialog.archived and dialog.pinned directly.
+                muted = False
+                try:
+                    notify = getattr(dialog.dialog, "notify_settings", None)
+                    mute_until = getattr(notify, "mute_until", None) if notify else None
+                    if mute_until is not None:
+                        # mute_until can be a datetime or an int timestamp; both compare as "in future = muted"
+                        if hasattr(mute_until, "timestamp"):
+                            muted = mute_until.timestamp() > datetime.now(timezone.utc).timestamp()
+                        else:
+                            muted = int(mute_until) > int(datetime.now(timezone.utc).timestamp())
+                except Exception:
+                    muted = False
                 results.append({
                     "name": dialog.name or "unknown",
                     "type": chat_type,
                     "last_message": last_text,
                     "last_date": last_date,
+                    "archived": bool(getattr(dialog, "archived", False)),
+                    "muted": muted,
+                    "pinned": bool(getattr(dialog, "pinned", False)),
+                    "unread": int(getattr(dialog, "unread_count", 0) or 0),
                 })
             except Exception:
                 continue

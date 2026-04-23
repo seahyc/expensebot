@@ -48,6 +48,17 @@ db.exec(`
     jid TEXT NOT NULL,
     PRIMARY KEY (session_id, jid)
   );
+  CREATE TABLE IF NOT EXISTS chats (
+    session_id TEXT NOT NULL,
+    chat_jid TEXT NOT NULL,
+    name TEXT,
+    archived INTEGER DEFAULT 0,
+    muted_until INTEGER DEFAULT 0,  -- 0 = not muted, -1 = forever, else unix ts
+    pinned INTEGER DEFAULT 0,
+    unread_count INTEGER DEFAULT 0,
+    updated_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (session_id, chat_jid)
+  );
 `);
 
 // Prepared statements
@@ -70,6 +81,85 @@ const queryMsgs = db.prepare(`
   WHERE session_id = ? AND timestamp >= ?
   ORDER BY timestamp ASC
 `);
+
+// Upsert chat metadata. COALESCE preserves existing values when the incoming
+// Baileys event omits a field (chats.update only includes changed fields).
+const upsertChat = db.prepare(`
+  INSERT INTO chats (session_id, chat_jid, name, archived, muted_until, pinned, unread_count, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())
+  ON CONFLICT(session_id, chat_jid) DO UPDATE SET
+    name         = COALESCE(excluded.name, chats.name),
+    archived     = COALESCE(excluded.archived, chats.archived),
+    muted_until  = COALESCE(excluded.muted_until, chats.muted_until),
+    pinned       = COALESCE(excluded.pinned, chats.pinned),
+    unread_count = COALESCE(excluded.unread_count, chats.unread_count),
+    updated_at   = unixepoch()
+`);
+
+const queryChats = db.prepare(`
+  SELECT chat_jid, name, archived, muted_until, pinned, unread_count, updated_at
+  FROM chats
+  WHERE session_id = ?
+`);
+
+// Translate a Baileys Chat object into the columns we store. Returns null if
+// the chat is unusable (e.g. broadcast/status). Each field is null when absent
+// so the COALESCE in upsertChat preserves prior state.
+function chatToRow(c) {
+  if (!c?.id) return null;
+  if (c.id === "status@broadcast") return null;
+  if (typeof isJidBroadcast === "function" && isJidBroadcast(c.id)) return null;
+
+  let mutedUntil = null;
+  // Baileys uses `muteEndTime` (number, ms or s depending on version) or
+  // legacy `mute` (boolean). Normalize to: 0 = not muted, -1 = forever, else seconds.
+  if (c.muteEndTime !== undefined && c.muteEndTime !== null) {
+    const n = Number(c.muteEndTime);
+    if (!Number.isFinite(n) || n === 0) mutedUntil = 0;
+    else if (n < 0) mutedUntil = -1;
+    else mutedUntil = n > 1e12 ? Math.floor(n / 1000) : n; // ms → s if needed
+  } else if (typeof c.mute === "boolean") {
+    mutedUntil = c.mute ? -1 : 0;
+  }
+
+  const archived = c.archived === undefined || c.archived === null
+    ? null
+    : (c.archived ? 1 : 0);
+  // Baileys `pin` is a timestamp when pinned, 0/undefined otherwise.
+  const pinnedRaw = c.pin ?? c.pinned;
+  const pinned = pinnedRaw === undefined || pinnedRaw === null
+    ? null
+    : (Number(pinnedRaw) > 0 ? 1 : 0);
+  const unread = c.unreadCount === undefined || c.unreadCount === null
+    ? null
+    : Math.max(0, Number(c.unreadCount));
+
+  return {
+    name: c.name ?? c.subject ?? null,
+    archived,
+    mutedUntil,
+    pinned,
+    unread,
+  };
+}
+
+function persistChat(sessionId, c) {
+  const row = chatToRow(c);
+  if (!row) return;
+  try {
+    upsertChat.run(
+      sessionId,
+      c.id,
+      row.name,
+      row.archived,
+      row.mutedUntil,
+      row.pinned,
+      row.unread,
+    );
+  } catch (e) {
+    log.warn({ sessionId, jid: c.id, err: e.message }, "upsertChat failed");
+  }
+}
 
 // Prune messages older than 90 days
 function pruneOldMessages() {
@@ -323,9 +413,19 @@ async function startSession(sessionId) {
       if (c.id && !c.id.endsWith("@broadcast") && !isJidBroadcast(c.id)) {
         state.knownJids.add(c.id);
         try { upsertJid.run(sessionId, c.id); } catch (_) {}
+        persistChat(sessionId, c);
       }
     }
     scheduleBackfill();
+  });
+
+  // chats.update fires for state changes (mute toggle, archive, pin, unread
+  // count changes). Baileys sends partial chat objects — persistChat handles
+  // that via COALESCE in the upsert.
+  sock.ev.on("chats.update", (updates) => {
+    for (const c of updates || []) {
+      if (c?.id) persistChat(sessionId, c);
+    }
   });
 }
 
@@ -416,6 +516,29 @@ app.get("/messages/:session_id", (req, res) => {
     res.json({ messages: rows });
   } catch (e) {
     log.error({ session_id, err: e.message }, "query messages failed");
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /chats/:session_id — return chat metadata (name, archived, muted, pinned, unread)
+app.get("/chats/:session_id", (req, res) => {
+  const { session_id } = req.params;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const rows = queryChats.all(session_id).map((r) => ({
+      chat_jid: r.chat_jid,
+      name: r.name,
+      archived: !!r.archived,
+      pinned: !!r.pinned,
+      unread_count: r.unread_count || 0,
+      // muted_until: 0 = not muted, -1 = muted forever, >0 = muted until that ts
+      muted: r.muted_until === -1 || (r.muted_until > 0 && r.muted_until > now),
+      muted_until: r.muted_until || 0,
+      updated_at: r.updated_at || 0,
+    }));
+    res.json({ chats: rows });
+  } catch (e) {
+    log.error({ session_id, err: e.message }, "query chats failed");
     res.status(500).json({ error: e.message });
   }
 });

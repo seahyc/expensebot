@@ -242,8 +242,11 @@ TOOLS = [
     {
         "name": "list_telegram_chats",
         "description": (
-            "List the user's most recently active Telegram chats, sorted by last activity "
-            "(same order as the Telegram sidebar — includes read chats, not just unread). "
+            "List the user's most recently active Telegram chats. Returned grouped: "
+            "pinned first, then live (unmuted, unarchived), then muted, then archived. "
+            "Each chat is tagged with 📌pinned / 🔕muted / 🗄archived flags and unread count. "
+            "When summarizing for the user, prioritize pinned + live chats; collapse muted "
+            "and archived ones to a brief mention unless the user asks about them specifically. "
             "Call this to find chat names before using get_telegram_chat."
         ),
         "input_schema": {
@@ -282,8 +285,11 @@ TOOLS = [
     {
         "name": "list_whatsapp_chats",
         "description": (
-            "List WhatsApp chats that have stored messages. "
-            "Returns contact names/numbers and message counts. "
+            "List WhatsApp chats with metadata. Returned grouped: pinned first, then live "
+            "(unmuted, unarchived), then muted, then archived. Each chat is tagged with "
+            "📌pinned / 🔕muted / 🗄archived flags and unread count. "
+            "When summarizing for the user, prioritize pinned + live chats; collapse muted "
+            "and archived ones to a brief mention unless the user asks about them specifically. "
             "Call this first when the user asks about a specific WA contact."
         ),
         "input_schema": {

@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -84,6 +85,7 @@ WHATSAPP_BRIDGE_URL = os.environ.get("WHATSAPP_BRIDGE_URL", "http://whatsapp-bri
 
 REPO_ROOT = Path(__file__).parent.parent
 TENANTS_DIR = REPO_ROOT / "tenants"
+SHORT_REFRESH_TTL = timedelta(days=7)
 
 # Tenant ids become filenames on disk. Restrict to a simple slug charset to
 # prevent path traversal (../../etc/foo) and any filesystem-special chars.
@@ -1477,6 +1479,8 @@ async def _typing_pulse(bot, chat_id, action: str = "typing"):
         task.cancel()
         try:
             await task
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
 
@@ -1485,7 +1489,19 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
     """Build a tool executor closure for the agent, bound to this user + file."""
 
     async def execute(tool_name: str, tool_input: dict) -> str:
+        # Normalize SDK objects into plain Python primitives so branch checks
+        # and dict access are deterministic.
+        tool_name = str(tool_name)
+        if not isinstance(tool_input, dict):
+            try:
+                tool_input = dict(tool_input or {})
+            except Exception:
+                tool_input = {}
         action = _TOOL_CHAT_ACTION.get(tool_name, "typing")
+        log.info(
+            "tool_execute.enter user=%s tool=%s action=%s chat_id=%s",
+            u.get("id"), tool_name, action, chat_id,
+        )
         # Fire a voice-tailored interim message for slow tools so the user sees
         # feedback even on bridges that don't relay Telegram typing actions (Beeper/Matrix).
         if bot and chat_id and tool_name in _TOOL_INTERIM_TOOLS:
@@ -1498,10 +1514,13 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     await bot.send_message(chat_id=chat_id, text=phrase)
                 except Exception:
                     pass
+        log.info("tool_execute.before_typing_pulse user=%s tool=%s", u.get("id"), tool_name)
         async with _typing_pulse(bot, chat_id, action=action):
+            log.info("tool_execute.inside_typing_pulse user=%s tool=%s", u.get("id"), tool_name)
             return await _execute_inner(tool_name, tool_input)
 
     async def _execute_inner(tool_name: str, tool_input: dict) -> str:
+        log.info("tool_execute.inner_enter user=%s tool=%s", u.get("id"), tool_name)
         if tool_name == "parse_receipt":
             if not file_bytes:
                 return "No receipt file attached. Ask the user to send a photo or PDF."
@@ -1538,13 +1557,38 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             return parsed_json
 
         elif tool_name == "list_claims":
+            t0 = time.monotonic()
             status_key = tool_input.get("status", "all")
             filters = FILTER_SHORTCUTS.get(status_key, ACTIVE_STATUS_FILTERS)
+            log.info(
+                "list_claims.start user=%s status=%s filters=%s",
+                u.get("id"), status_key, filters,
+            )
             async with client_for(u) as client:
-                data = await client.list_submissions(status_filters=filters, page_size=15)
+                t_list = time.monotonic()
+                data = await asyncio.wait_for(
+                    client.list_submissions(status_filters=filters, page_size=15),
+                    timeout=20.0,
+                )
                 rows = data.get("results", [])
-                doc_ids = await _resolve_doc_ids(client, u["id"], [r["id"] for r in rows])
+                log.info(
+                    "list_claims.list_submissions_done user=%s rows=%d elapsed=%.2fs",
+                    u.get("id"), len(rows), time.monotonic() - t_list,
+                )
+                t_docs = time.monotonic()
+                doc_ids = await asyncio.wait_for(
+                    _resolve_doc_ids(client, u["id"], [r["id"] for r in rows]),
+                    timeout=20.0,
+                )
+                log.info(
+                    "list_claims.resolve_doc_ids_done user=%s docs=%d elapsed=%.2fs",
+                    u.get("id"), len(doc_ids), time.monotonic() - t_docs,
+                )
             if not rows:
+                log.info(
+                    "list_claims.empty user=%s status=%s total_elapsed=%.2fs",
+                    u.get("id"), status_key, time.monotonic() - t0,
+                )
                 return f"No {status_key} claims found."
             tenant_id = u.get("tenant_id")
             lines = []
@@ -1561,6 +1605,10 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     f"{r.get('merchant') or '?'} [{sl}] "
                     f"{(r.get('description') or '')[:50]}{preview}"
                 )
+            log.info(
+                "list_claims.success user=%s returned_rows=%d total_elapsed=%.2fs",
+                u.get("id"), len(lines), time.monotonic() - t0,
+            )
             return "\n".join(lines)
 
         elif tool_name == "submit_claim":
@@ -1751,11 +1799,32 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
                     return f"(Telegram list_chats error: {e})"
             if not all_chats:
                 return "No Telegram chats found."
-            lines = ["Recent Telegram chats (most active first):"]
+            # Sort: pinned first, then live (not muted/archived) by recency, then muted, then archived.
+            def _bucket(c: dict) -> int:
+                if c.get("pinned"):
+                    return 0
+                if c.get("archived"):
+                    return 3
+                if c.get("muted"):
+                    return 2
+                return 1
+            # Stable sort by bucket only — preserves Telegram's recency order within each bucket.
+            all_chats.sort(key=_bucket)
+            lines = ["Recent Telegram chats (pinned/live first, then muted, then archived):"]
             for i, c in enumerate(all_chats[:30], 1):
                 date_str = f" [{c['last_date']}]" if c['last_date'] else ""
                 last = f" — \"{c['last_message'][:70]}\"" if c['last_message'] else ""
-                lines.append(f"{i}. **{c['name']}** ({c['type']}){date_str}{last}")
+                flags = []
+                if c.get("pinned"):
+                    flags.append("📌pinned")
+                if c.get("muted"):
+                    flags.append("🔕muted")
+                if c.get("archived"):
+                    flags.append("🗄archived")
+                if c.get("unread"):
+                    flags.append(f"{c['unread']} unread")
+                flag_str = f" [{', '.join(flags)}]" if flags else ""
+                lines.append(f"{i}. **{c['name']}** ({c['type']}){flag_str}{date_str}{last}")
             return "\n".join(lines)
 
         elif tool_name == "get_telegram_chat":
@@ -1787,29 +1856,76 @@ async def _build_tool_executor(u: dict, file_bytes: bytes | None = None, media_t
             if not wa_accounts:
                 return "WhatsApp is not connected."
             since_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
-            results = []
+            # Per-chat aggregate: {jid: {count, last, name, archived, muted, pinned, unread}}
+            chats: dict[str, dict] = {}
             async with httpx.AsyncClient() as _hc:
                 for _acct in wa_accounts:
                     sid = _acct["session_id"]
+                    # Pull chat metadata (mute/archive/pin/unread/name). New endpoint —
+                    # tolerate older bridges by skipping if 404/connection error.
+                    try:
+                        meta_r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/chats/{sid}", timeout=5.0)
+                        if meta_r.status_code == 200:
+                            for c in meta_r.json().get("chats", []):
+                                jid = c.get("chat_jid")
+                                if not jid:
+                                    continue
+                                chats.setdefault(jid, {"count": 0, "last": ""})
+                                chats[jid].update({
+                                    "name": c.get("name"),
+                                    "archived": bool(c.get("archived")),
+                                    "muted": bool(c.get("muted")),
+                                    "pinned": bool(c.get("pinned")),
+                                    "unread": int(c.get("unread_count") or 0),
+                                })
+                    except Exception:
+                        pass
+                    # Pull recent messages so we can show counts + a snippet.
                     try:
                         r = await _hc.get(f"{WHATSAPP_BRIDGE_URL}/messages/{sid}", params={"since": since_ts}, timeout=5.0)
                         if r.status_code != 200:
                             continue
-                        msgs = r.json().get("messages", [])
-                        # Group by chat_jid
-                        chat_counts: dict[str, dict] = {}
-                        for m in msgs:
+                        for m in r.json().get("messages", []):
                             jid = m.get("chat_jid", "unknown")
-                            if jid not in chat_counts:
-                                chat_counts[jid] = {"count": 0, "last": ""}
-                            chat_counts[jid]["count"] += 1
-                            if not chat_counts[jid]["last"] and m.get("text"):
-                                chat_counts[jid]["last"] = m["text"][:60]
-                        for jid, info in sorted(chat_counts.items(), key=lambda x: -x[1]["count"]):
-                            results.append(f"- {jid} — {info['count']} messages | last: {info['last']}")
+                            entry = chats.setdefault(jid, {"count": 0, "last": ""})
+                            entry["count"] = entry.get("count", 0) + 1
+                            if not entry.get("last") and m.get("text"):
+                                entry["last"] = m["text"][:60]
                     except Exception:
                         continue
-            return ("WhatsApp chats:\n" + "\n".join(results)) if results else f"No WhatsApp messages in the last {days} days (bridge may need reconnection)."
+            if not chats:
+                return f"No WhatsApp activity in the last {days} days (bridge may need reconnection)."
+            # Sort: pinned → live → muted → archived. Within bucket, by message count desc.
+            def _bucket(info: dict) -> int:
+                if info.get("pinned"):
+                    return 0
+                if info.get("archived"):
+                    return 3
+                if info.get("muted"):
+                    return 2
+                return 1
+            sorted_items = sorted(
+                chats.items(),
+                key=lambda kv: (_bucket(kv[1]), -kv[1].get("count", 0)),
+            )
+            lines = ["WhatsApp chats (pinned/live first, then muted, then archived):"]
+            for jid, info in sorted_items:
+                label = info.get("name") or jid
+                flags = []
+                if info.get("pinned"):
+                    flags.append("📌pinned")
+                if info.get("muted"):
+                    flags.append("🔕muted")
+                if info.get("archived"):
+                    flags.append("🗄archived")
+                if info.get("unread"):
+                    flags.append(f"{info['unread']} unread")
+                flag_str = f" [{', '.join(flags)}]" if flags else ""
+                count = info.get("count", 0)
+                last = info.get("last", "")
+                last_str = f" | last: {last}" if last else ""
+                lines.append(f"- {label} ({jid}){flag_str} — {count} msgs{last_str}")
+            return "\n".join(lines)
 
         elif tool_name == "get_whatsapp_chat":
             contact = tool_input.get("contact", "")
@@ -3255,7 +3371,8 @@ async function submitKey(){{
     async def extension_pair(p: PairPayload, request: Request) -> dict:
         # Rate-limit by client IP. The pairing code space is only 1M combos;
         # without a per-IP cap an attacker can brute-force codes against the
-        # 5-min TTL window. This is independent of the telegram-side /pair
+        # 5-min TTL window. This is independent of the telegram-side
+        # /connect_omnihr
         # per-user rate limit.
         client_ip = (request.client.host if request.client else "unknown") or "unknown"
         ok, retry = rate_limit.check(f"ip:{client_ip}", "ip_pair")
@@ -3280,6 +3397,9 @@ async function submitKey(){{
             refresh_exp = parse_jwt_exp(p.refresh_token)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Bad JWT: {e}")
+        now_utc = datetime.now(timezone.utc)
+        access_ttl = access_exp - now_utc
+        refresh_ttl = refresh_exp - now_utc
 
         # Fetch user details from OmniHR to confirm
         async with httpx.AsyncClient(base_url="https://api.omnihr.co/api/v1") as http:
@@ -3317,6 +3437,21 @@ async function submitKey(){{
             email=user_email,
             tenant_id=tenant_id,
         )
+        log.info(
+            "extension_pair success user=%s tenant=%s employee=%s access_ttl=%s refresh_ttl=%s",
+            user_db_id,
+            tenant_id,
+            me.get("id") or p.employee_id,
+            access_ttl,
+            refresh_ttl,
+        )
+        if refresh_ttl < SHORT_REFRESH_TTL:
+            log.warning(
+                "extension_pair short_refresh_ttl user=%s tenant=%s refresh_ttl=%s",
+                user_db_id,
+                tenant_id,
+                refresh_ttl,
+            )
 
         # DM the user via Telegram — this is the payoff message after all 3 steps
         if tg_app:
