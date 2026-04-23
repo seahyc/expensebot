@@ -2394,6 +2394,11 @@ async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot, log
             f"- suggested sub-category: {_p.suggested_sub_category_label or '(none)'}\n"
             f"- description draft: {_p.description_draft or '(none)'}\n- file: {_pf.filename}"
         )
+    # Keep the typing indicator alive for the whole turn — same as the regular
+    # text handler does. Without this, callers like crash-recovery replay and
+    # button-choice flows get no typing dots while the agent thinks.
+    _stop_typing = asyncio.Event()
+    _typing_task = asyncio.create_task(_keep_typing(bot, chat_id, _stop_typing))
     tool_turns_json: str | None = None
     try:
         reply, tool_turns_json = await asyncio.wait_for(
@@ -2417,6 +2422,13 @@ async def _run_agent_turn_for_text(*, u: dict, chat_id: int, text: str, bot, log
     except Exception as e:
         log.warning("agent failed in choice callback: %s", e)
         reply = f"Something went wrong: {e}"
+    finally:
+        _stop_typing.set()
+        _typing_task.cancel()
+        try:
+            await _typing_task
+        except (asyncio.CancelledError, Exception):
+            pass
     storage.log_message(u["id"], "out", reply, tool_turns=tool_turns_json)
     try:
         await bot.send_message(chat_id=chat_id, text=reply, parse_mode="Markdown")

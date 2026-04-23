@@ -374,8 +374,20 @@ async function startSession(sessionId) {
     if (count > 0) log.info({ sessionId, source, count }, "stored messages");
   }
 
-  sock.ev.on("messaging-history.set", ({ messages: historyMsgs }) => {
+  sock.ev.on("messaging-history.set", ({ messages: historyMsgs, chats: historyChats }) => {
     storeMessages(historyMsgs || [], "history-sync");
+    // Seed the chats table from history sync — this is the only source of
+    // chat metadata when reconnecting on cached auth (chats.upsert won't
+    // re-fire for already-known chats).
+    if (Array.isArray(historyChats) && historyChats.length) {
+      let seeded = 0;
+      for (const c of historyChats) {
+        if (!c?.id) continue;
+        persistChat(sessionId, c);
+        seeded++;
+      }
+      log.info({ sessionId, seeded }, "seeded chats from history-sync");
+    }
   });
 
   sock.ev.on("messages.upsert", ({ messages, type }) => {
