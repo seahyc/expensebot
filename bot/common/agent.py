@@ -137,6 +137,7 @@ def build_context_text(
     user_message: str,
     triangulation_md: str | None = None,
     pending_receipt_md: str | None = None,
+    reply_mode: str = "text",
 ) -> str:
     about_block = (
         f"## About you\n{profile_md}\n\n"
@@ -163,6 +164,17 @@ def build_context_text(
         if pending_receipt_md else ""
     )
     integrations_block = build_integrations_block(user) if user else ""
+    voice_block = (
+        "## Reply mode: VOICE\n"
+        "Your reply will be spoken aloud to the user via TTS. Write for the ear, not the eye:\n"
+        "- No emoji, no markdown (no **bold**, no *italics*, no `code`, no [links], no headings).\n"
+        "- No bullet lists, numbered lists, or tables. Use flowing prose.\n"
+        "- Be concise — aim for 1–3 short sentences unless the question demands more.\n"
+        "- Use contractions (I'm, you're, it's) and natural spoken rhythm.\n"
+        "- Spell out symbols and IDs when helpful (say \"claim one two six\" not \"#126\").\n"
+        "- Don't mention that you're speaking, or that this is voice — just talk.\n\n"
+        if reply_mode == "voice" else ""
+    )
     return (
         f"## Now\n{_now_sgt()}\n\n"
         f"{integrations_block}"
@@ -172,6 +184,7 @@ def build_context_text(
         f"{user_md or '(none yet — propose a rule when the user corrects you)'}\n\n"
         f"{triangulation_block}"
         f"{pending_block}"
+        f"{voice_block}"
         f"{'[User sent a receipt photo/PDF — call parse_receipt first, then get_omnihr_context]' if has_file else ''}\n"
         f"## User message\n{user_message}"
     )
@@ -190,6 +203,7 @@ async def run_agent(
     user: dict[str, Any] | None = None,
     system_prompt: str | None = None,
     pending_receipt_md: str | None = None,
+    reply_mode: str = "text",
 ) -> tuple[str, str | None]:
     """Run the agent loop. Returns (final_text, tool_turns_json).
 
@@ -243,6 +257,7 @@ async def run_agent(
                     has_file=has_file,
                     user_message=user_message,
                     pending_receipt_md=pending_receipt_md,
+                    reply_mode=reply_mode,
                 ),
                 "cache_control": {"type": "ephemeral"},
             },

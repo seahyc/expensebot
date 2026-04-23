@@ -2571,6 +2571,7 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             conversation_history=history,
             user=u,
             pending_receipt_md=pending_receipt_md,
+            reply_mode="voice",
         )
     except Exception as e:
         log.warning("agent failed on voice input: %s", e)
@@ -2584,12 +2585,12 @@ async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     sent_voice = await _send_voice_reply(ctx.bot, msg.chat_id, reply, u)
 
-    # Send the text too if we couldn't voice it, or if the reply carries structure
-    # (Markdown, long) that doesn't read well aloud.
+    # Only fall back to text if voice failed, or if the reply still carries
+    # structure the model couldn't avoid (code blocks, long lists).
     needs_text = (
         not sent_voice
-        or len(reply) > 500
-        or any(tok in reply for tok in ("```", "](", "• ", "- ", "\n1.", "\n2."))
+        or "```" in reply
+        or len(reply) > 800
     )
     if needs_text:
         try:
