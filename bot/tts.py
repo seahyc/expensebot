@@ -84,6 +84,27 @@ _MD_INLINE_CODE = re.compile(r"`([^`]+)`")
 _MD_EMPH = re.compile(r"(\*\*|\*|_{1,2})(.+?)\1")
 _URL = re.compile(r"https?://\S+")
 
+# Emoji + pictograph ranges — Kokoro/espeak-ng will otherwise speak the
+# unicode name ("grinning face with smiling eyes"), which sounds terrible.
+_EMOJI = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F700-\U0001F77F"  # alchemical
+    "\U0001F780-\U0001F7FF"  # geometric shapes ext
+    "\U0001F800-\U0001F8FF"  # supplemental arrows
+    "\U0001F900-\U0001F9FF"  # supplemental symbols & pictographs
+    "\U0001FA00-\U0001FA6F"  # chess symbols
+    "\U0001FA70-\U0001FAFF"  # symbols & pictographs ext-A
+    "\U00002600-\U000027BF"  # misc symbols + dingbats
+    "\U0001F1E6-\U0001F1FF"  # flags (regional indicators)
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0000200D"             # zero-width joiner
+    "]+",
+    flags=re.UNICODE,
+)
+
 
 def _strip_markdown(text: str) -> str:
     """Make Markdown-ish agent text speakable."""
@@ -92,6 +113,7 @@ def _strip_markdown(text: str) -> str:
     text = _MD_INLINE_CODE.sub(r"\1", text)
     text = _MD_EMPH.sub(r"\2", text)
     text = _URL.sub("", text)
+    text = _EMOJI.sub("", text)
     text = text.replace("#", "number ")
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
