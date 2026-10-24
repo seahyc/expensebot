@@ -6,7 +6,7 @@ Stubs for now. Each handler:
   3. Formats response with Telegram-specific markup.
 
 Commands implemented in v1:
-  /start    /setkey    /pair    /list    /status <id>    /submit <id>
+  /start    /setkey    /connect_omnihr    /list    /status <id>    /submit <id>
   /trip <name>    /endtrip    /portal <subdomain>    /orgconfig
   /upgrade   /myrules   /export
 """
@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 async def cmd_start(update, context):
     """First contact — onboarding flow."""
-    raise NotImplementedError("v1: send onboarding message + setkey + pair instructions")
+    raise NotImplementedError("v1: send onboarding message + setkey + connect_omnihr instructions")
 
 
 async def cmd_setkey(update, context):

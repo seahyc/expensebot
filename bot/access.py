@@ -6,9 +6,9 @@ Three env vars control who can use the bot:
                             Useful during testing / invite-only launch.
   ADMIN_TELEGRAM_USER_IDS — comma-separated Telegram user ids. Admins bypass
                             all restrictions.
-  ALLOWED_EMAIL_DOMAINS   — comma-separated. After /pair, user's OmniHR email
-                            must end in one of these or the session is
-                            immediately unpaired. Empty = allow any.
+  ALLOWED_EMAIL_DOMAINS   — comma-separated. After /connect_omnihr, user's
+                            OmniHR email must end in one of these or the
+                            session is immediately unlinked. Empty = allow any.
 
   BANNED_TELEGRAM_USER_IDS — comma-separated hard-blocklist.
 """

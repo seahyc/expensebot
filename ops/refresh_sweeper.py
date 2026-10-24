@@ -7,7 +7,7 @@ on refresh: the sweeper keeps the DB copy current even for users who haven't
 interacted recently.
 
 Users whose refresh token is already expired are skipped (nothing we can do —
-they must /pair again on their next interaction). AuthError during refresh
+they must /connect_omnihr again on their next interaction). AuthError during refresh
 (refresh rejected server-side) is logged; we leave the stale row alone so the
 next user action surfaces the "Session expired" reply.
 """
@@ -40,7 +40,7 @@ EXPIRY_MESSAGE = (
     "1. Sign in to your company's OmniHR in Chrome (it's at "
     "`<your-company>.omnihr.co`, e.g. `glints.omnihr.co`). Google SSO is fine. "
     "Your browser session probably expired too.\n"
-    "2. Send /pair here. I'll reply with a 6-digit code.\n"
+    "2. Send /connect_omnihr here. I'll reply with a 6-digit code.\n"
     "3. On that OmniHR tab, click the 💰 *Janai* icon in Chrome's toolbar "
     "(puzzle-piece menu if unpinned) → paste the code → tap *Pair*.\n\n"
     "Don't have the extension anymore? "
@@ -56,7 +56,7 @@ async def sweep_once(
     notifier: Notifier | None = None,
 ) -> dict:
     """Refresh tokens for every near-expiry user, then DM users whose refresh
-    token is already expired so they know to /pair. Returns counts for logging.
+    token is already expired so they know to /connect_omnihr. Returns counts for logging.
     """
     candidates = storage.users_needing_refresh(within=REFRESH_WINDOW)
     refreshed = failed = 0

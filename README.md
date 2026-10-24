@@ -36,7 +36,7 @@ backend with a one-time pairing code.
 User flow:
 1. `/start` in bot → instructions
 2. `/setkey sk-ant-…` (or `/upgrade` for managed tier) → Anthropic API key for parsing
-3. `/pair` → bot returns 6-digit code
+3. `/connect_omnihr` → bot returns 6-digit code
 4. User installs extension, opens omnihr.co (signs in via Google SSO normally),
    clicks extension icon, pastes code → backend stores refresh JWT
 5. Bot DMs "Paired as Ying Cong (Glints)"
@@ -97,7 +97,7 @@ Most operations don't touch Claude:
 
 | Action | LLM call? |
 |---|---|
-| `/list`, `/status`, `/pair`, `/setkey` | No |
+| `/list`, `/status`, `/connect_omnihr`, `/setkey` | No |
 | Status poller DMs | No |
 | Dupe check on file SHA | No |
 | Edit field on existing draft | No |

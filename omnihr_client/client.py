@@ -92,7 +92,7 @@ class OmniHRClient:
     async def _ensure_fresh(self) -> None:
         if self.tokens.access_expired:
             if self.tokens.refresh_expired:
-                raise AuthError("Refresh token expired — user must re-pair")
+                raise AuthError("Refresh token expired — user must reconnect OmniHR")
             self.tokens = await refresh_access_token(self._http, self.tokens.refresh_token)
             if self._on_tokens_refreshed is not None:
                 try:

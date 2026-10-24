@@ -46,7 +46,7 @@ In Telegram, find your bot, send:
 ```
 /start
 /setkey sk-ant-…           # your Anthropic key
-/pair
+/connect_omnihr
 ```
 
 Bot replies with a 6-digit code (e.g. `384192`).
@@ -93,8 +93,9 @@ Verify on https://glints.omnihr.co/expenses/submission/.
   chrome://extensions → Janai → "Service worker" → console.
 - **Bot says "Not paired"** after pairing — JWTs landed in the DB but lookup
   failed. Check `sqlite3 expensebot.db "SELECT id, omnihr_full_name, omnihr_employee_id, length(access_jwt) FROM users;"`
-- **OmniHR 401** — JWT expired. Tokens are valid ~15 min for access, ~30 days
-  for refresh. The client auto-refreshes; if both expired, re-pair.
+- **OmniHR 401** — JWT expired. Access tokens are short-lived, and refresh-token
+  lifetime depends on the browser session you paired from. The client
+  auto-refreshes; if refresh is also expired, run `/connect_omnihr` again.
 - **Schema drift error** — HR added a mandatory field. Open the modal once
   via web UI to see what's needed; update `tenants/glints.md` curated rules
   section to teach the parser.

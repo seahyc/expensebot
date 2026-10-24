@@ -6,7 +6,7 @@ Uses libsodium SecretBox via pynacl. Key is derived from ENCRYPTION_KEY env var
     python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 Never log or DM the key. If it's lost/rotated, all stored secrets become
-unrecoverable — users need to re-/setkey + re-/pair. That's by design.
+unrecoverable — users need to reconnect Claude and OmniHR. That's by design.
 """
 
 from __future__ import annotations

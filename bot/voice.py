@@ -12,6 +12,17 @@ log = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).parent.parent
 REPO_VOICES_DIR = Path(__file__).parent / "voices"
 
+TELEGRAM_COMMANDS = [
+    ("start", "Status and integrations"),
+    ("login", "Connect Claude AI"),
+    ("connect_omnihr", "Link or relink OmniHR"),
+    ("connect_google", "Connect Gmail and Calendar"),
+    ("connect_telegram", "Connect Telegram message context"),
+    ("connect_whatsapp", "Connect WhatsApp message context"),
+    ("list", "Show recent claims"),
+    ("memories", "Show what Janai remembers"),
+]
+
 
 def voice_config_dir() -> Path:
     return Path(os.getenv("VOICE_CONFIG_DIR", "/app/data/voices"))
@@ -174,7 +185,17 @@ def default_voice() -> VoicePack:
 
 
 def build_agent_system_prompt(user: dict[str, Any] | None = None) -> str:
-    return voice_for_user(user).agent_system
+    prompt = voice_for_user(user).agent_system
+    commands_block = "\n".join(
+        f"- `/{name}` — {description}" for name, description in TELEGRAM_COMMANDS
+    )
+    return (
+        f"{prompt}\n\n"
+        "AVAILABLE TELEGRAM COMMANDS:\n"
+        f"{commands_block}\n\n"
+        "When you tell the user to reconnect or set something up, choose from "
+        "the available commands above. Do not invent slash commands."
+    )
 
 
 def memory_template(user: dict[str, Any] | None = None) -> str:

@@ -35,7 +35,9 @@ function renderPills(container, accounts, labelKey, service, idKey) {
     const pill = document.createElement("div");
     pill.className = "account-pill";
     const label = document.createElement("span");
-    label.textContent = "✅ " + (acct[labelKey] || acct[idKey] || "connected");
+    const state = acct.valid === false ? "⚠️ " : "✅ ";
+    const suffix = acct.valid === false ? " (expired)" : "";
+    label.textContent = state + (acct[labelKey] || acct[idKey] || "connected") + suffix;
     const btn = document.createElement("button");
     btn.className = "remove-btn";
     btn.textContent = "✕";
@@ -73,6 +75,11 @@ function applyStatus(s) {
     statusEl.textContent = `✅ Paired as ${s.name || "?"}`;
     codeEl.style.display = "none";
     pairBtn.style.display = "none";
+  } else if (s.session_expired) {
+    statusEl.className = "status warn";
+    statusEl.textContent = "OmniHR session expired — get a new code from /connect_omnihr.";
+    codeEl.style.display = "";
+    pairBtn.style.display = "";
   }
 
   // Google accounts

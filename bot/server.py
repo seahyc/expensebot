@@ -3586,20 +3586,67 @@ async function submitKey(){{
         google_accounts = storage.get_google_accounts(uid)
         tg_accounts = storage.get_telegram_accounts(uid)
         wa_accounts = storage.get_whatsapp_accounts(uid)
+
+        def _future(dt: Any) -> bool:
+            if not dt:
+                return False
+            if isinstance(dt, str):
+                try:
+                    dt = datetime.fromisoformat(dt)
+                except ValueError:
+                    return False
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt > datetime.now(timezone.utc)
+
+        refresh_expires_at = u.get("refresh_expires_at")
+        refresh_live = _future(refresh_expires_at)
+        paired = bool(u.get("access_jwt")) and refresh_live
+
+        google_statuses = []
+        for acct in google_accounts:
+            has_refresh = bool(acct.get("refresh_token"))
+            access_live = bool(acct.get("access_token")) and _future(acct.get("expiry"))
+            valid = access_live or has_refresh
+            google_statuses.append({
+                "email": acct.get("email") or "",
+                "valid": valid,
+                "expired": bool(acct.get("access_token")) and not valid,
+            })
+
+        telegram_statuses = [
+            {
+                "phone": acct.get("phone") or "",
+                "valid": bool(acct.get("session_str")),
+                "expired": not bool(acct.get("session_str")),
+            }
+            for acct in tg_accounts
+        ]
+        whatsapp_statuses = [
+            {
+                "phone": acct.get("phone") or "",
+                "session_id": acct.get("session_id") or "",
+                "valid": bool(acct.get("session_id")),
+                "expired": not bool(acct.get("session_id")),
+            }
+            for acct in wa_accounts
+        ]
         return {
-            "paired": bool(u.get("access_jwt")),
+            "paired": paired,
+            "session_expired": bool(u.get("access_jwt")) and not refresh_live,
+            "refresh_expires_at": refresh_expires_at or "",
             "name": u.get("omnihr_full_name") or "",
             # Legacy single-account fields (for backward compat)
-            "google": bool(google_accounts),
-            "google_email": google_accounts[0]["email"] if google_accounts else "",
-            "telegram": bool(tg_accounts),
-            "telegram_phone": tg_accounts[0]["phone"] if tg_accounts else "",
-            "whatsapp": bool(wa_accounts),
-            "whatsapp_phone": wa_accounts[0]["phone"] if wa_accounts else "",
+            "google": any(a["valid"] for a in google_statuses),
+            "google_email": google_statuses[0]["email"] if google_statuses else "",
+            "telegram": any(a["valid"] for a in telegram_statuses),
+            "telegram_phone": telegram_statuses[0]["phone"] if telegram_statuses else "",
+            "whatsapp": any(a["valid"] for a in whatsapp_statuses),
+            "whatsapp_phone": whatsapp_statuses[0]["phone"] if whatsapp_statuses else "",
             # New multi-account arrays
-            "google_accounts": [{"email": a["email"]} for a in google_accounts],
-            "telegram_accounts": [{"phone": a["phone"]} for a in tg_accounts],
-            "whatsapp_accounts": [{"phone": a["phone"], "session_id": a["session_id"]} for a in wa_accounts],
+            "google_accounts": google_statuses,
+            "telegram_accounts": telegram_statuses,
+            "whatsapp_accounts": whatsapp_statuses,
         }
 
     @app.delete("/extension/account")
@@ -4155,7 +4202,6 @@ async def run() -> None:
             await tg_app.bot.send_message(
                 chat_id=int(chan_uid),
                 text=message,
-                parse_mode="Markdown",
                 disable_web_page_preview=True,
             )
         else:
